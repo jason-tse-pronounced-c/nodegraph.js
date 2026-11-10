@@ -128,12 +128,13 @@ export const NG_CSS = `/* nodegraph.css — minimal themeable styles.
 .ng-group-resize.ng-resize-ne, .ng-group-resize.ng-resize-sw { cursor: nesw-resize; }
 /* group boundary ports — interface anchors on a group's border (see
    addGroupPort). They look like node ports but are neutral-coloured: a group
-   port is bidirectional, it can both source and sink an edge. */
+   port is a drop target only — edges attach to it (in either direction), and
+   dragging the port itself slides it along the group's border. */
 .ng-group-port {
   fill: var(--ng-group-port);
   stroke: var(--ng-group-port);
   stroke-width: 1;
-  cursor: crosshair;
+  cursor: move;
 }
 .ng-group-port:hover { stroke-width: 3; }
 /* while dragging an edge toward a group border: the ghost dot marks where a
@@ -200,6 +201,8 @@ export const NG_CSS = `/* nodegraph.css — minimal themeable styles.
 .ng-port:hover { stroke-width: 3; }
 /* invisible enlarged grab area around ports */
 .ng-port-hit { fill: transparent; stroke: none; cursor: crosshair; }
+/* ...but a group boundary port's grab area slides the port, not an edge */
+.ng-gport-hit { cursor: move; }
 
 /* edges — the visible stroke lives in a layer ABOVE the nodes (a connector
    must never be hidden by a node's outline) and is click-through; the wide
@@ -1515,6 +1518,13 @@ export class Renderer {
     // wide invisible hit-lines for the selected edge's segments — below the
     // nodes so they never block clicking a node the edge passes over
     this.segHitLayer = el('g', { class: 'ng-seg-hits' }, this.viewport);
+    // group boundary ports — their OWN layer, above the edge/segment hit-paths
+    // and below the nodes. An edge wired to a port draws a 14px-wide invisible
+    // hit-path right over it; if the port lived in groupsLayer (bottom) that
+    // hit-path would swallow the drop and a SECOND port would be created on top
+    // of the first. Here the port wins its own click, while a node port sitting
+    // on a group border still wins (nodes paint above).
+    this.groupPortsLayer = el('g', { class: 'ng-group-ports' }, this.viewport);
     this.nodesLayer = el('g', { class: 'ng-nodes' }, this.viewport);
     // visible edges drawn ABOVE the nodes so a connector is never hidden by a
     // node's outline; they are pointer-events:none (see .ng-edge in the CSS),
@@ -1538,6 +1548,7 @@ export class Renderer {
     const selGroups = selectedGroupIds instanceof Set ? selectedGroupIds : new Set(selectedGroupIds ? [selectedGroupIds] : []);
     this.marqueeLayer.textContent = '';
     this.groupsLayer.textContent = '';
+    this.groupPortsLayer.textContent = '';
     this.edgesHitLayer.textContent = '';
     this.segHitLayer.textContent = '';
     this.nodesLayer.textContent = '';
@@ -1772,13 +1783,14 @@ export class Renderer {
       class: 'ng-group-label', 'data-group': group.id,
     }, g);
     label.textContent = group.label || 'Group';
-    // boundary ports — interface anchors on the border. Drawn after the body
-    // rect so they paint over it; each has an invisible larger hit circle so
-    // they are easy to grab, exactly like a node's ports.
+    // boundary ports — interface anchors on the border. Drawn in their own
+    // layer (above the edge hit-paths, below the nodes — see the constructor)
+    // so an edge already wired here can't steal the drop; each has an invisible
+    // larger hit circle so it is easy to grab, exactly like a node's port.
     for (const port of group.ports || []) {
       const p = groupPortPos(group, port);
-      el('circle', { cx: p.x, cy: p.y, r: 5, class: 'ng-group-port', 'data-gport': group.id, 'data-gport-id': port.id, 'data-group': group.id }, g);
-      el('circle', { cx: p.x, cy: p.y, r: 10, class: 'ng-port-hit', 'data-gport': group.id, 'data-gport-id': port.id, 'data-group': group.id }, g);
+      el('circle', { cx: p.x, cy: p.y, r: 5, class: 'ng-group-port', 'data-gport': group.id, 'data-gport-id': port.id, 'data-group': group.id }, this.groupPortsLayer);
+      el('circle', { cx: p.x, cy: p.y, r: 10, class: 'ng-port-hit ng-gport-hit', 'data-gport': group.id, 'data-gport-id': port.id, 'data-group': group.id }, this.groupPortsLayer);
     }
     if (selected) {
       el('rect', {
@@ -2596,22 +2608,19 @@ function setupInteractions(model, renderer, render, history) {
       return;
     }
 
-    // a group's boundary port → start a connection from the group's interface
-    // anchor, exactly like a node port. The group itself is excluded from
-    // border candidates so you can never wire a group to its own border.
+    // A group's boundary port is a drop target, never a source: dragging it
+    // slides the port along the group's border (attached edges follow).
     const gportEl = closest(e, 'data-gport');
     if (gportEl) {
       const group = (model.groups || []).find((g) => g.id === gportEl.dataset.gport);
       const gport = group && (group.ports || []).find((p) => p.id === gportEl.dataset.gportId);
       if (!group || !gport) return;
       drag = {
-        kind: 'connect',
-        originPort: 'group',
-        source: { group: group.id, port: gport.id },
-        origin: groupPortPos(group, gport),
-        excludeGroup: group.id,
+        kind: 'gport-move',
+        groupId: group.id,
+        portId: gport.id,
+        pre: history.begin(),
       };
-      renderer.tempPath.style.display = '';
       return;
     }
 
@@ -2896,6 +2905,32 @@ function setupInteractions(model, renderer, render, history) {
         setNodeWidth(model, node.id, w);
         render();
       }
+    } else if (drag.kind === 'gport-move') {
+      const group = (model.groups || []).find((g) => g.id === drag.groupId);
+      if (!group) return;
+      const gport = (group.ports || []).find((p) => p.id === drag.portId);
+      if (!gport) return;
+      const p = screenToGraph(e.clientX, e.clientY);
+      // project the cursor onto the port's side: t is the normalised spot along
+      // the border, snapped to the grid and clamped to the side's extent
+      const horiz = gport.side === 'top' || gport.side === 'bottom';
+      const lo = horiz ? group.x : group.y;
+      const span = horiz ? group.w : group.h;
+      const along = Math.min(Math.max(snapToGrid(horiz ? p.x : p.y), lo), lo + span);
+      const t = span > 0 ? (along - lo) / span : gport.t;
+      if (t === gport.t) return;
+      // the waypoint runs glued to the port follow it, exactly as when a node
+      // moves: snapshot the drawn endpoints, mutate t, translate the runs
+      const prevEnds = groupPortEnds(model, group.id);
+      gport.t = t;
+      for (const edge of model.edges) {
+        const prev = prevEnds.get(edge.id);
+        if (!prev) continue;
+        const ends = edgeEnds(model, edge);
+        if (!ends) continue;
+        edge.points = adjustPointsForMove(edge.points, ends.a, ends.b, prev.a, prev.b);
+      }
+      render();
     } else if (drag.kind === 'connect') {
       const p = screenToGraph(e.clientX, e.clientY);
       // draw the rubber band out of the port you grabbed, into the cursor
@@ -3008,21 +3043,11 @@ function setupInteractions(model, renderer, render, history) {
       const gportEl = under && under.closest ? under.closest('[data-gport]') : null;
       if (port && svg.contains(port)) {
         const target = { node: port.dataset.node, param: port.dataset.param };
-        // allow dragging in either direction — orient out → in automatically.
-        // A group boundary port is bidirectional: the node's own side decides
-        // (drop on an input → the group feeds it; on an output → it feeds the
-        // group), so the same-side rejection only applies node-port to node-port.
-        const [src, dst] =
-          drag.originPort === 'group'
-            ? port.dataset.port === 'in'
-              ? [drag.source, target]
-              : [target, drag.source]
-            : drag.originPort === 'out'
-              ? [drag.source, target]
-              : [target, drag.source];
-        if (drag.originPort !== 'group' && port.dataset.port === drag.originPort) {
+        // allow dragging in either direction — orient out → in automatically
+        if (port.dataset.port === drag.originPort) {
           toast('Connect an output port to an input port');
         } else {
+          const [src, dst] = drag.originPort === 'out' ? [drag.source, target] : [target, drag.source];
           const pre = history.begin();
           try {
             connect(model, src, dst);

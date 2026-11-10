@@ -97,7 +97,7 @@ re-renders.
 | `setGroupRect(id, { x, y, w, h })` | reposition/resize (w, h floored at 1; interactive corner grips floor at `GROUP_MIN`) |
 | `moveGroup(id, x, y)` | move the box and translate every member node (and every nested group + its members) by the same delta |
 | `groupMembers(id)` | ids of the nodes currently inside (centre-based) |
-| `addGroupPort(groupId, { side, t })` | add a boundary port (`side`: `top`/`right`/`bottom`/`left`, `t`: 0..1 along it); returns it. Edges can attach to a group through these anchors — one interface for the whole box (e.g. load balancing) |
+| `addGroupPort(groupId, { side, t })` | add a boundary port (`side`: `top`/`right`/`bottom`/`left`, `t`: 0..1 along it); returns it. Edges attach to a group through these anchors — one interface for the whole box (e.g. load balancing). A port is a drop target: edges from node output *or* input ports can wire to it; the port itself never starts an edge |
 | `removeGroupPort(groupId, portId)` | remove the port and every edge wired to it |
 | `getGroupPorts(groupId)` | the group's ports (live array) |
 
@@ -184,8 +184,8 @@ setting the same label, a `connect()` that throws — record nothing.
 | drag empty canvas | marquee-select nodes |
 | drag middle button | pan (wheel zooms, anchored at the cursor) |
 | drag port → port | connect (either direction: out→in or in→out) |
-| drag port → group border | connect to the group: a ghost dot + border highlight preview the spot, dropping there creates a boundary port and wires it |
-| drag group port | start a new edge from the group's interface (a group never wires to its own border) |
+| drag port → group border | connect to the group: a ghost dot + border highlight preview the spot, dropping there creates a boundary port and wires it (works from an output *or* input port — the edge is oriented automatically) |
+| drag group port | slide it along the group's border (grid-snapped, clamped to the side); attached edges follow. It never starts an edge — group ports only accept connections |
 | right-click a group port | **Delete port** (removes the port and its edges) |
 | drag a selected node's right-edge grip | resize its width |
 | drag a param row | reorder the node's params (an insertion line shows where the row lands) |
