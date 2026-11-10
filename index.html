@@ -29,10 +29,21 @@
     // double border and a light tinted fill (right-click → Group colour to
     // tint it). Membership is geometric (a node belongs while its centre is
     // inside the box), so dragging the group carries Source + Process along
-    // together. Right-click the canvas for "Add group here"; drag a group's
-    // body to move it, its corner grip to resize, or double-click its label to
-    // rename. Everything snaps to the grid.
+    // together — and any group nested inside it too. Right-click the canvas for
+    // "Add group here"; drag a group's body to move it, any of its four corner
+    // grips to resize, or double-click its label to rename. Clicking a group
+    // that sits inside another selects the inner one. Everything snaps to the
+    // grid.
     graph.addGroup({ x: 60, y: 100, w: 540, h: 140, label: 'Pipeline', color: '#8250df' });
+
+    // More things to try:
+    //  • drag a param row up/down to reorder it (edges follow the row)
+    //  • select nodes/groups and Ctrl/Cmd+C, then Ctrl/Cmd+V to paste a copy
+    //    (a copied group brings its nodes along; repeat pastes cascade)
+    //  • where two edges overlap, click the same spot repeatedly to cycle
+    //    between them; right-click an edge for "Edge colour"
+    //  • auto-routed edges recompute their obstacle-avoiding path when you
+    //    drop a node, not while you drag it
   </script>
 </body>
 </html>
