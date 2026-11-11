@@ -357,16 +357,47 @@ if (typeof document !== 'undefined' && !document.getElementById('ng-style')) {
 // MODEL — plain-object graph, CRUD, JSON. No DOM, no dependencies.
 // ═══════════════════════════════════════════════════════════════════════════
 // No DOM, no dependencies. All functions operate on a model object:
-//   { nodes: [{ id, label, x, y, params: [{ id, name }] }],
-//     edges: [{ id, source: { node, param }, target: { node, param },
-//              label, labelT, points: [{ x, y }] }] }
+//   { nodes:  [{ id, label, x, y, width?, color?, params: [{ id, name }] }],
+//     edges:  [{ id, source, target,   // each: { node, param } or { group, port }
+//               label, labelT, points: [{ x, y }], color? }],
+//     groups: [{ id, label, x, y, w, h, color?, fill?, ports: [{ id, side, t }] }] }
 // Every parameter has both an input port (left) and an output port (right).
 // Edges are orthogonal (90°) polylines: source port → corners → target port.
 // An empty `points` array means the renderer picks a default Z-route.
 // `label` is the edge's single label; `labelT` (0..1) is where it sits along it.
+// A `color` (#rgb/#rrggbb) overrides the theme accent; groups have no stored
+// membership — a node belongs while its centre is inside the box.
 
 let seq = 0;
 const uid = (prefix) => `${prefix}${(seq++).toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+// Clamp a fraction into 0..1 (label positions, port positions along a side).
+const clamp01 = (v) => Math.min(1, Math.max(0, v));
+
+// A valid accent colour is a #rgb / #rrggbb hex string, stored as given (only
+// trimmed + lower-cased, so '#abc' stays '#abc'). null when not a hex colour.
+const validColor = (color) => {
+  const c = typeof color === 'string' ? color.trim().toLowerCase() : null;
+  return c && /^#([0-9a-f]{3}|[0-9a-f]{6})$/.test(c) ? c : null;
+};
+
+// Shared body of setNodeColor / setEdgeColor / setGroupColor: a null/blank
+// colour deletes the property (theme default returns), an invalid value is
+// ignored, a valid one is stored.
+const applyColor = (obj, color) => {
+  if (typeof color !== 'string' || !color.trim()) {
+    delete obj.color;
+    return;
+  }
+  const c = validColor(color);
+  if (c) obj.color = c;
+};
+
+// Spread form for importJSON: { color } when valid, {} when absent/invalid.
+const colorProp = (v) => {
+  const c = validColor(v);
+  return c ? { color: c } : {};
+};
 
 export function createModel() {
   return { nodes: [], edges: [], groups: [] };
@@ -419,13 +450,7 @@ export function setNodeWidth(model, id, width) {
 // the theme default). Invalid values are ignored.
 export function setNodeColor(model, id, color) {
   const node = findNode(model, id);
-  if (!node) return;
-  const c = typeof color === 'string' ? color.trim().toLowerCase() : null;
-  if (!c) {
-    delete node.color;
-    return;
-  }
-  if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/.test(c)) node.color = c;
+  if (node) applyColor(node, color);
 }
 
 // --- parameters ---
@@ -461,6 +486,10 @@ export function moveParam(model, nodeId, paramId, toIndex) {
 }
 
 // --- edges ---
+
+function findEdge(model, id) {
+  return model.edges.find((e) => e.id === id);
+}
 
 // An edge endpoint is a ref: either a param port { node, param } or a group
 // boundary port { group, port }. Resolve a ref to its graph point (or null
@@ -501,7 +530,7 @@ export function removeEdge(model, id) {
 
 // Set the edge's single label text.
 export function setEdgeLabel(model, id, label) {
-  const edge = model.edges.find((e) => e.id === id);
+  const edge = findEdge(model, id);
   if (edge) edge.label = label;
 }
 
@@ -509,26 +538,20 @@ export function setEdgeLabel(model, id, label) {
 // theme default). The colour paints the edge's stroke. Invalid values are
 // ignored — same rules as setNodeColor.
 export function setEdgeColor(model, id, color) {
-  const edge = model.edges.find((e) => e.id === id);
-  if (!edge) return;
-  const c = typeof color === 'string' ? color.trim().toLowerCase() : null;
-  if (!c) {
-    delete edge.color;
-    return;
-  }
-  if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/.test(c)) edge.color = c;
+  const edge = findEdge(model, id);
+  if (edge) applyColor(edge, color);
 }
 
 // Set where the label sits along the edge, as a fraction of total length (0..1).
 export function setEdgeLabelT(model, id, t) {
-  const edge = model.edges.find((e) => e.id === id);
-  if (edge) edge.labelT = Math.min(1, Math.max(0, t));
+  const edge = findEdge(model, id);
+  if (edge) edge.labelT = clamp01(t);
 }
 
 // Replace an edge's manual waypoints (graph coordinates).
 // An empty array restores the automatic route.
 export function setEdgePoints(model, id, points) {
-  const edge = model.edges.find((e) => e.id === id);
+  const edge = findEdge(model, id);
   if (edge) edge.points = points.map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }));
 }
 
@@ -576,13 +599,7 @@ export function setGroupLabel(model, id, label) {
 // border. Invalid values are ignored.
 export function setGroupColor(model, id, color) {
   const group = findGroup(model, id);
-  if (!group) return;
-  const c = typeof color === 'string' ? color.trim().toLowerCase() : null;
-  if (!c) {
-    delete group.color;
-    return;
-  }
-  if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/.test(c)) group.color = c;
+  if (group) applyColor(group, color);
 }
 
 // Turn a group's fill on or off. With fill off the group is a pure outline:
@@ -604,18 +621,12 @@ export function setGroupFill(model, id, on) {
 export function setGroupRect(model, id, { x, y, w, h } = {}) {
   const group = findGroup(model, id);
   if (!group) return;
-  const prevEnds = groupPortEnds(model, id);
-  if (Number.isFinite(Number(x))) group.x = Number(x);
-  if (Number.isFinite(Number(y))) group.y = Number(y);
-  if (Number.isFinite(Number(w))) group.w = Math.max(1, Number(w));
-  if (Number.isFinite(Number(h))) group.h = Math.max(1, Number(h));
-  for (const edge of model.edges) {
-    const prev = prevEnds.get(edge.id);
-    if (!prev) continue;
-    const ends = edgeEnds(model, edge);
-    if (!ends) continue;
-    edge.points = adjustPointsForMove(edge.points, ends.a, ends.b, prev.a, prev.b);
-  }
+  followWaypoints(model, (e) => e.source.group === id || e.target.group === id, () => {
+    if (Number.isFinite(Number(x))) group.x = Number(x);
+    if (Number.isFinite(Number(y))) group.y = Number(y);
+    if (Number.isFinite(Number(w))) group.w = Math.max(1, Number(w));
+    if (Number.isFinite(Number(h))) group.h = Math.max(1, Number(h));
+  });
 }
 
 // --- group boundary ports ---
@@ -641,7 +652,7 @@ export function addGroupPort(model, groupId, { side = 'right', t = 0.5 } = {}) {
   const group = findGroup(model, groupId);
   if (!group) return null;
   const s = GROUP_SIDES.includes(side) ? side : 'right';
-  const tt = Math.min(1, Math.max(0, Number(t) || 0));
+  const tt = clamp01(Number(t) || 0);
   if (!group.ports) group.ports = [];
   // never stack two ports on the same spot — reuse the one already there
   const near = groupPortNear(group, s, tt);
@@ -669,18 +680,27 @@ export function edgeEnds(model, edge) {
   return a && b ? { a, b } : null;
 }
 
-// Snapshot the drawn endpoints of every edge whose waypoints are glued to one
-// of a group's boundary ports — the before-picture a group resize/move needs
-// to translate those runs afterwards (see adjustPointsForMove).
-function groupPortEnds(model, groupId) {
-  const map = new Map();
+// Run `mutate` and translate the waypoint runs glued to the ports of every
+// edge matching `watch` — the single implementation of the snapshot → mutate →
+// adjust dance that every port-moving operation needs (see
+// adjustPointsForMove). Only edges with manual waypoints are touched; an edge
+// whose endpoints stop resolving mid-mutate is skipped.
+function followWaypoints(model, watch, mutate) {
+  const prev = new Map();
   for (const edge of model.edges) {
-    if (!edge.points.length) continue;
-    if (edge.source.group !== groupId && edge.target.group !== groupId) continue;
+    if (!edge.points.length || !watch(edge)) continue;
     const ends = edgeEnds(model, edge);
-    if (ends) map.set(edge.id, { a: { ...ends.a }, b: { ...ends.b } });
+    if (ends) prev.set(edge.id, { a: { ...ends.a }, b: { ...ends.b } });
   }
-  return map;
+  const result = mutate();
+  for (const edge of model.edges) {
+    const p = prev.get(edge.id);
+    if (!p) continue;
+    const ends = edgeEnds(model, edge);
+    if (!ends) continue;
+    edge.points = adjustPointsForMove(edge.points, ends.a, ends.b, p.a, p.b);
+  }
+  return result;
 }
 
 // Translate a set of groups AND a set of member nodes by (dx, dy), both snapped
@@ -692,36 +712,28 @@ function groupPortEnds(model, groupId) {
 export function moveGroupsBy(model, groupIds, nodeIds, dx, dy) {
   const moved = new Set(nodeIds);
   const movedGroups = new Set(groupIds);
-  const prevEnds = new Map();
-  for (const edge of model.edges) {
-    if (!edge.points.length) continue;
-    const touchesNode = moved.has(edge.source.node) || moved.has(edge.target.node);
-    const touchesGroup = movedGroups.has(edge.source.group) || movedGroups.has(edge.target.group);
-    if (!touchesNode && !touchesGroup) continue;
-    const ends = edgeEnds(model, edge);
-    if (ends) prevEnds.set(edge.id, { a: { ...ends.a }, b: { ...ends.b } });
-  }
-  for (const gid of groupIds) {
-    const g = findGroup(model, gid);
-    if (g) {
-      g.x = snapToGrid(g.x + dx);
-      g.y = snapToGrid(g.y + dy);
-    }
-  }
-  for (const nid of moved) {
-    const node = findNode(model, nid);
-    if (node) {
-      node.x = snapToGrid(node.x + dx);
-      node.y = snapToGrid(node.y + dy);
-    }
-  }
-  for (const edge of model.edges) {
-    const prev = prevEnds.get(edge.id);
-    if (!prev) continue;
-    const ends = edgeEnds(model, edge);
-    if (!ends) continue;
-    edge.points = adjustPointsForMove(edge.points, ends.a, ends.b, prev.a, prev.b);
-  }
+  followWaypoints(
+    model,
+    (edge) =>
+      moved.has(edge.source.node) || moved.has(edge.target.node) ||
+      movedGroups.has(edge.source.group) || movedGroups.has(edge.target.group),
+    () => {
+      for (const gid of groupIds) {
+        const g = findGroup(model, gid);
+        if (g) {
+          g.x = snapToGrid(g.x + dx);
+          g.y = snapToGrid(g.y + dy);
+        }
+      }
+      for (const nid of moved) {
+        const node = findNode(model, nid);
+        if (node) {
+          node.x = snapToGrid(node.x + dx);
+          node.y = snapToGrid(node.y + dy);
+        }
+      }
+    },
+  );
 }
 
 // --- helpers ---
@@ -762,9 +774,7 @@ export function importJSON(text) {
         name: p.name ?? 'param',
       })),
       ...(Number.isFinite(Number(n.width)) ? { width: Math.max(100, Number(n.width)) } : {}),
-      ...(typeof n.color === 'string' && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(n.color.trim())
-        ? { color: n.color.trim().toLowerCase() }
-        : {}),
+      ...colorProp(n.color),
     });
   }
   // groups are parsed BEFORE edges: an edge endpoint may reference a group
@@ -779,9 +789,7 @@ export function importJSON(text) {
       y: Number(g.y) || 0,
       w: Math.max(1, Number(g.w)),
       h: Math.max(1, Number(g.h)),
-      ...(typeof g.color === 'string' && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(g.color.trim())
-        ? { color: g.color.trim().toLowerCase() }
-        : {}),
+      ...colorProp(g.color),
       // fill is opt-out: only an explicit false persists (absent = filled)
       ...(g.fill === false ? { fill: false } : {}),
       // boundary ports are optional too; bad entries are dropped
@@ -789,7 +797,7 @@ export function importJSON(text) {
         ? {
             ports: g.ports
               .filter((p) => p && GROUP_SIDES.includes(p.side))
-              .map((p) => ({ id: p.id ?? uid('gp'), side: p.side, t: Math.min(1, Math.max(0, Number(p.t) || 0)) })),
+              .map((p) => ({ id: p.id ?? uid('gp'), side: p.side, t: clamp01(Number(p.t) || 0) })),
           }
         : {}),
     });
@@ -807,11 +815,9 @@ export function importJSON(text) {
       source: { ...e.source },
       target: { ...e.target },
       label: e.label ?? '',
-      labelT: Number.isFinite(Number(e.labelT)) ? Math.min(1, Math.max(0, Number(e.labelT))) : 0.5,
+      labelT: Number.isFinite(Number(e.labelT)) ? clamp01(Number(e.labelT)) : 0.5,
       points: Array.isArray(e.points) ? e.points.map((p) => ({ x: Number(p.x) || 0, y: Number(p.y) || 0 })) : [],
-      ...(typeof e.color === 'string' && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(e.color.trim())
-        ? { color: e.color.trim().toLowerCase() }
-        : {}),
+      ...colorProp(e.color),
     });
   }
   return model;
@@ -963,6 +969,25 @@ export function snapToGrid(v, step = GRID) {
   return Math.round(v / step) * step;
 }
 
+// Bounding-box accumulator: grow(x, y) expands the box with a point; box()
+// returns { x0, y0, x1, y1 }, or null while nothing has been added. Shared by
+// fitView, paste centring, and the PDF scene bounds.
+function bbox() {
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  return {
+    grow(x, y) {
+      if (x < x0) x0 = x;
+      if (y < y0) y0 = y;
+      if (x > x1) x1 = x;
+      if (y > y1) y1 = y;
+    },
+    box: () => (Number.isFinite(x0) ? { x0, y0, x1, y1 } : null),
+  };
+}
+
 // Accent colours offered in the "Node colour" menu. A node's colour paints its
 // header (and its border), so the palette is chosen to stay legible in both
 // themes; `null` restores the theme default.
@@ -985,6 +1010,27 @@ export function normalizeColor(color) {
   if (!m) return null;
   const hex = m[1].length === 3 ? m[1].split('').map((ch) => ch + ch).join('') : m[1];
   return `#${hex}`;
+}
+
+// Parse a CSS colour (#rgb / #rrggbb / #rrggbbaa / rgb() / rgba()) into
+// components: r, g, b in 0–255, a in 0–1. Anything unparseable is black.
+// Shared by the PDF scene snapshot (alpha compositing) and the PDF writer.
+function parseColor(value) {
+  const s = String(value || '').trim();
+  let m = /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+))?/i.exec(s);
+  if (m) return { r: +m[1], g: +m[2], b: +m[3], a: m[4] == null ? 1 : +m[4] };
+  m = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(s);
+  if (m) {
+    let h = m[1];
+    let a = 1;
+    if (h.length === 3) h = h.split('').map((c) => c + c).join('');
+    if (h.length === 8) {
+      a = parseInt(h.slice(6, 8), 16) / 255;
+      h = h.slice(0, 6);
+    }
+    return { r: parseInt(h.slice(0, 2), 16), g: parseInt(h.slice(2, 4), 16), b: parseInt(h.slice(4, 6), 16), a };
+  }
+  return { r: 0, g: 0, b: 0, a: 1 };
 }
 
 // #rrggbb + alpha (0–1) → rgba(r, g, b, a). Assumes a normalised hex colour.
@@ -1467,11 +1513,11 @@ export function polylineLength(pts) {
 // Point at fraction `t` (0..1) of cumulative polyline length — where the label sits.
 export function polylinePointAt(pts, t = 0.5) {
   const total = polylineLength(pts);
-  let target = Math.min(1, Math.max(0, t)) * total;
+  let target = clamp01(t) * total;
   for (let i = 1; i < pts.length; i++) {
     const d = Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
     if (target <= d || i === pts.length - 1) {
-      const u = d ? Math.min(1, Math.max(0, target / d)) : 0;
+      const u = d ? clamp01(target / d) : 0;
       return { x: pts[i - 1].x + (pts[i].x - pts[i - 1].x) * u, y: pts[i - 1].y + (pts[i].y - pts[i - 1].y) * u };
     }
     target -= d;
@@ -1500,7 +1546,7 @@ function distToSegment(px, py, a, b) {
   const len2 = dx * dx + dy * dy;
   if (!len2) return Math.hypot(px - a.x, py - a.y);
   let t = ((px - a.x) * dx + (py - a.y) * dy) / len2;
-  t = Math.min(1, Math.max(0, t));
+  t = clamp01(t);
   return Math.hypot(px - (a.x + dx * t), py - (a.y + dy * t));
 }
 
@@ -1577,14 +1623,12 @@ export class Renderer {
   render(model, selectedEdgeId, selectedNodeIds, selectedGroupIds, dragging = false) {
     const selNodes = selectedNodeIds instanceof Set ? selectedNodeIds : new Set(selectedNodeIds ? [selectedNodeIds] : []);
     const selGroups = selectedGroupIds instanceof Set ? selectedGroupIds : new Set(selectedGroupIds ? [selectedGroupIds] : []);
-    this.marqueeLayer.textContent = '';
-    this.groupsLayer.textContent = '';
-    this.groupPortsLayer.textContent = '';
-    this.edgesHitLayer.textContent = '';
-    this.segHitLayer.textContent = '';
-    this.nodesLayer.textContent = '';
-    this.edgesLayer.textContent = '';
-    this.overlayLayer.textContent = '';
+    // wipe every content layer (indicatorLayer is excluded — it survives render
+    // frames during a gesture and is cleared when the gesture ends)
+    for (const layer of [
+      this.marqueeLayer, this.groupsLayer, this.groupPortsLayer, this.edgesHitLayer,
+      this.segHitLayer, this.nodesLayer, this.edgesLayer, this.overlayLayer,
+    ]) layer.textContent = '';
     for (const group of model.groups || []) this.#renderGroup(group, selGroups.has(group.id));
     const obstacles = nodeRects(model);
     for (const edge of model.edges) this.#renderEdge(edge, model, edge.id === selectedEdgeId, obstacles, dragging);
@@ -1626,19 +1670,8 @@ export class Renderer {
 
     // PDF has no alpha, so a translucent group fill is composited over the page
     // background into an opaque equivalent before it is written.
-    const toRgb = (v) => {
-      const s = String(v || '').trim();
-      let m = /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+))?/i.exec(s);
-      if (m) return { r: +m[1], g: +m[2], b: +m[3], a: m[4] == null ? 1 : +m[4] };
-      m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(s);
-      if (m) {
-        const h = m[1].length === 3 ? m[1].split('').map((c) => c + c).join('') : m[1];
-        return { r: parseInt(h.slice(0, 2), 16), g: parseInt(h.slice(2, 4), 16), b: parseInt(h.slice(4, 6), 16), a: 1 };
-      }
-      return { r: 0, g: 0, b: 0, a: 1 };
-    };
     const mixOn = (bg, fg, alpha) => {
-      const b = toRgb(bg), c = toRgb(fg);
+      const b = parseColor(bg), c = parseColor(fg);
       const a = alpha == null ? c.a : alpha;
       const ch = (x, y) => Math.round(x * (1 - a) + y * a);
       const hex = (v) => v.toString(16).padStart(2, '0');
@@ -2065,6 +2098,31 @@ function setupInteractions(model, renderer, render, history) {
     if (!same) render();
   };
 
+  // Shift-click: toggle one id in a selection set (nodes or groups), dropping
+  // any edge selection, and re-render.
+  const toggleSelect = (set, id) => {
+    if (set.has(id)) set.delete(id);
+    else set.add(id);
+    selEdge = null;
+    render();
+  };
+
+  // Begin a node drag over `ids`: snapshot their positions (the drag moves
+  // relative to these origins) and take the pre-state for one undo step.
+  const nodeDrag = (ids, p) => {
+    drag = {
+      kind: 'node',
+      ids,
+      dx: p.x,
+      dy: p.y,
+      pre: history.begin(),
+      origins: new Map(ids.map((id) => {
+        const n = findNode(model, id);
+        return [id, { x: n.x, y: n.y }];
+      })),
+    };
+  };
+
   const screenToGraph = (clientX, clientY) => {
     const r = svg.getBoundingClientRect();
     return {
@@ -2087,36 +2145,39 @@ function setupInteractions(model, renderer, render, history) {
     renderer.setView(view);
   };
 
+  // Zoom to `scale` (clamped) keeping the container-relative point (px, py)
+  // fixed on screen — the graph point under the anchor stays under it.
+  const zoomAt = (px, py, scale) => {
+    const s = Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale));
+    view.x = px - ((px - view.x) / view.scale) * s;
+    view.y = py - ((py - view.y) / view.scale) * s;
+    view.scale = s;
+    renderer.setView(view);
+  };
+
   // Zoom so ALL content fits the canvas, centred, with a margin of clear space
   // around it. The bounding box spans every node, group, and routed edge
   // polyline (so a long auto-routed edge with no waypoints is framed too).
   // Scale is clamped to the wheel-zoom range; an empty graph just resets.
   const fitView = () => {
-    let x0 = Infinity;
-    let y0 = Infinity;
-    let x1 = -Infinity;
-    let y1 = -Infinity;
-    const grow = (x, y) => {
-      if (x < x0) x0 = x;
-      if (y < y0) y0 = y;
-      if (x > x1) x1 = x;
-      if (y > y1) y1 = y;
-    };
+    const bb = bbox();
     for (const n of model.nodes) {
-      grow(n.x, n.y);
-      grow(n.x + nodeWidth(n), n.y + nodeHeight(n));
+      bb.grow(n.x, n.y);
+      bb.grow(n.x + nodeWidth(n), n.y + nodeHeight(n));
     }
     for (const g of model.groups || []) {
-      grow(g.x, g.y);
-      grow(g.x + g.w, g.y + g.h);
+      bb.grow(g.x, g.y);
+      bb.grow(g.x + g.w, g.y + g.h);
     }
     const obstacles = nodeRects(model);
     for (const edge of model.edges) {
       const ends = edgeEnds(model, edge);
       if (!ends) continue;
-      for (const p of edgePoints(ends.a, ends.b, edge.points, obstacles)) grow(p.x, p.y);
+      for (const p of edgePoints(ends.a, ends.b, edge.points, obstacles)) bb.grow(p.x, p.y);
     }
-    if (!Number.isFinite(x0)) return resetView(); // nothing to frame
+    const b = bb.box();
+    if (!b) return resetView(); // nothing to frame
+    const { x0, y0, x1, y1 } = b;
     const r = svg.getBoundingClientRect();
     const pad = 40; // clear space, in screen px
     const bw = Math.max(1, x1 - x0);
@@ -2207,6 +2268,15 @@ function setupInteractions(model, renderer, render, history) {
     editor = { input, finish };
   };
 
+  // Shared onCommit for the label editors: trim, fall back to `fallback` when
+  // empty, skip no-ops, otherwise record one undo step and apply the new value.
+  const renameCommit = (old, fallback, apply) => (v) => {
+    const nv = v.trim() || fallback;
+    if (nv === old) return;
+    history.push();
+    apply(nv);
+  };
+
   const editNode = (node) => {
     const p = graphToScreen(node.x + 6, node.y + 2);
     openEditor({
@@ -2214,12 +2284,7 @@ function setupInteractions(model, renderer, render, history) {
       sy: p.y,
       w: (180 - 56) * view.scale,
       text: node.label,
-      onCommit: (v) => {
-        const nv = v.trim() || node.label;
-        if (nv === node.label) return;
-        history.push();
-        node.label = nv;
-      },
+      onCommit: renameCommit(node.label, node.label, (nv) => { node.label = nv; }),
     });
   };
 
@@ -2230,12 +2295,7 @@ function setupInteractions(model, renderer, render, history) {
       sy: p.y,
       w: (180 - 40) * view.scale,
       text: param.name,
-      onCommit: (v) => {
-        const nv = v.trim() || param.name;
-        if (nv === param.name) return;
-        history.push();
-        param.name = nv;
-      },
+      onCommit: renameCommit(param.name, param.name, (nv) => { param.name = nv; }),
     });
   };
 
@@ -2246,12 +2306,7 @@ function setupInteractions(model, renderer, render, history) {
       sy: p.y,
       w: Math.max(80, Math.min(group.w, 240)) * view.scale,
       text: group.label || '',
-      onCommit: (v) => {
-        const nv = v.trim() || 'Group';
-        if (nv === group.label) return;
-        history.push();
-        setGroupLabel(model, group.id, nv);
-      },
+      onCommit: renameCommit(group.label, 'Group', (nv) => setGroupLabel(model, group.id, nv)),
     });
   };
 
@@ -2328,23 +2383,18 @@ function setupInteractions(model, renderer, render, history) {
   const pasteClipboard = () => {
     if (!clipboard) return;
     // bounding box of the snapshot (nodes + groups) in graph coords
-    let x0 = Infinity;
-    let y0 = Infinity;
-    let x1 = -Infinity;
-    let y1 = -Infinity;
+    const bb = bbox();
     for (const n of clipboard.nodes) {
-      x0 = Math.min(x0, n.x);
-      y0 = Math.min(y0, n.y);
-      x1 = Math.max(x1, n.x + nodeWidth(n));
-      y1 = Math.max(y1, n.y + nodeHeight(n));
+      bb.grow(n.x, n.y);
+      bb.grow(n.x + nodeWidth(n), n.y + nodeHeight(n));
     }
     for (const g of clipboard.groups) {
-      x0 = Math.min(x0, g.x);
-      y0 = Math.min(y0, g.y);
-      x1 = Math.max(x1, g.x + g.w);
-      y1 = Math.max(y1, g.y + g.h);
+      bb.grow(g.x, g.y);
+      bb.grow(g.x + g.w, g.y + g.h);
     }
-    if (!Number.isFinite(x0)) return; // empty snapshot — nothing to paste
+    const b = bb.box();
+    if (!b) return; // empty snapshot — nothing to paste
+    const { x0, y0, x1, y1 } = b;
     // centre of the visible canvas, in graph coordinates
     const r = svg.getBoundingClientRect();
     const c = screenToGraph(r.left + r.width / 2, r.top + r.height / 2);
@@ -2358,50 +2408,58 @@ function setupInteractions(model, renderer, render, history) {
     toast(`Pasted ${nodeIds.size} node${nodeIds.size === 1 ? '' : 's'}`);
   };
 
-  const exportJson = async () => {
-    const json = exportJSON(model);
-    const name = 'graph.json';
+  // Save `data` (string or bytes) to `name`: the File System Access API when
+  // available, otherwise a download link. A cancelled picker stays silent;
+  // failures toast `failMsg`.
+  const saveFile = async (name, mime, data, okMsg, failMsg) => {
     try {
       if (window.showSaveFilePicker) {
         const handle = await window.showSaveFilePicker({
           suggestedName: name,
-          types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }],
+          types: [{ description: name.split('.').pop().toUpperCase(), accept: { [mime]: [`.${name.split('.').pop()}`] } }],
         });
         const writable = await handle.createWritable();
-        await writable.write(json);
+        await writable.write(data);
         await writable.close();
-        return toast('Graph saved');
+        return toast(okMsg);
       }
-      const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+      const url = URL.createObjectURL(new Blob([data], { type: mime }));
       const link = document.createElement('a');
       link.href = url;
       link.download = name;
       link.click();
       URL.revokeObjectURL(url);
-      toast('Graph downloaded');
+      toast(okMsg);
     } catch (err) {
       if (err && err.name === 'AbortError') return; // user cancelled
-      toast('Save failed');
+      toast(failMsg);
     }
+  };
+
+  const exportJson = () =>
+    saveFile('graph.json', 'application/json', exportJSON(model), 'Graph saved', 'Save failed');
+
+  // Read a JSON file chosen by the user: the File System Access API when
+  // available, otherwise a hidden <input type=file>. Rejects AbortError on cancel.
+  const pickJson = async () => {
+    if (window.showOpenFilePicker) {
+      const [handle] = await window.showOpenFilePicker({
+        types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }],
+      });
+      return (await handle.getFile()).text();
+    }
+    return new Promise((resolve, reject) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.json,application/json';
+      input.onchange = () => (input.files[0] ? input.files[0].text().then(resolve) : reject(new Error('AbortError')));
+      input.click();
+    });
   };
 
   const importJson = async () => {
     try {
-      let text;
-      if (window.showOpenFilePicker) {
-        const [handle] = await window.showOpenFilePicker({
-          types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }],
-        });
-        text = await (await handle.getFile()).text();
-      } else {
-        text = await new Promise((resolve, reject) => {
-          const input = document.createElement('input');
-          input.type = 'file';
-          input.accept = '.json,application/json';
-          input.onchange = () => (input.files[0] ? input.files[0].text().then(resolve) : reject(new Error('AbortError')));
-          input.click();
-        });
-      }
+      const text = await pickJson();
       const pre = history.begin(); // snapshot before mutating; a failed
       applyImportJSON(model, text); // import throws and records nothing
       history.push(pre);
@@ -2437,26 +2495,8 @@ function setupInteractions(model, renderer, render, history) {
     if (!ids.length) return toast('Nothing to export');
     try {
       const bytes = buildPDF(renderer.buildScene(model, ids));
-      const name = 'graph.pdf';
-      if (window.showSaveFilePicker) {
-        const handle = await window.showSaveFilePicker({
-          suggestedName: name,
-          types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }],
-        });
-        const writable = await handle.createWritable();
-        await writable.write(bytes);
-        await writable.close();
-        return toast('PDF saved');
-      }
-      const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = name;
-      link.click();
-      URL.revokeObjectURL(url);
-      toast('PDF downloaded');
-    } catch (err) {
-      if (err && err.name === 'AbortError') return; // user cancelled
+      await saveFile('graph.pdf', 'application/pdf', bytes, 'PDF saved', 'PDF export failed');
+    } catch {
       toast('PDF export failed');
     }
   };
@@ -2518,89 +2558,74 @@ function setupInteractions(model, renderer, render, history) {
     // rename a selected group
     if (selGroups.size === 1) {
       const gid = [...selGroups][0];
-      const group = (model.groups || []).find((g) => g.id === gid);
+      const group = findGroup(model, gid);
       if (group) items.push({ label: 'Rename group', action: () => editGroup(group) });
     }
     // rename a selected node (mirrors Rename group; double-clicking the node's
     // header does the same thing directly)
     if (selNodes.size === 1) {
       const nid = [...selNodes][0];
-      const node = model.nodes.find((n) => n.id === nid);
+      const node = findNode(model, nid);
       if (node) items.push({ label: 'Rename node', action: () => editNode(node) });
     }
+    // A "… colour" submenu: the standard palette plus Default (null restores
+    // the theme colour). `apply` receives the chosen colour; `extra` appends
+    // items (e.g. the group's "No fill").
+    const colorSubmenu = (label, apply, extra = []) => ({
+      label,
+      submenu: [
+        ...NODE_COLORS.map((c) => ({ label: c.name, swatch: c.value, action: () => apply(c.value) })),
+        { label: 'Default', action: () => apply(null) },
+        ...extra,
+      ],
+    });
     // tint the selected edge(s) — same palette as nodes; the colour paints the
     // edge's stroke (the selected highlight still wins on screen)
     if (selEdge) {
       const eid = selEdge;
-      const setEdgeColorAll = (c) => {
+      items.push(colorSubmenu('Edge colour', (c) => {
         history.push();
         setEdgeColor(model, eid, c);
         render();
-      };
-      items.push({
-        label: 'Edge colour',
-        submenu: [
-          ...NODE_COLORS.map((c) => ({
-            label: c.name,
-            swatch: c.value,
-            action: () => setEdgeColorAll(c.value),
-          })),
-          { label: 'Default', action: () => setEdgeColorAll(null) },
-        ],
-      });
+      }));
     }
     // tint the selected group(s) — same palette as nodes; the colour washes
     // the group's fill and paints its double border. "No fill" drops the wash
     // entirely (outline-only); picking any colour brings the fill back.
     if (selGroups.size) {
       const gids = [...selGroups];
-      const setGroupColorAll = (c) => {
-        history.push();
-        for (const id of gids) {
-          setGroupFill(model, id, true);
-          setGroupColor(model, id, c);
-        }
-        render();
-      };
-      items.push({
-        label: 'Group colour',
-        submenu: [
-          ...NODE_COLORS.map((c) => ({
-            label: c.name,
-            swatch: c.value,
-            action: () => setGroupColorAll(c.value),
-          })),
-          { label: 'Default', action: () => setGroupColorAll(null) },
-          {
-            label: 'No fill',
-            action: () => {
-              history.push();
-              for (const id of gids) setGroupFill(model, id, false);
-              render();
-            },
+      items.push(
+        colorSubmenu(
+          'Group colour',
+          (c) => {
+            history.push();
+            for (const id of gids) {
+              setGroupFill(model, id, true);
+              setGroupColor(model, id, c);
+            }
+            render();
           },
-        ],
-      });
+          [
+            {
+              label: 'No fill',
+              action: () => {
+                history.push();
+                for (const id of gids) setGroupFill(model, id, false);
+                render();
+              },
+            },
+          ],
+        ),
+      );
     }
     // colour the selected node(s) — shown whenever at least one node is selected
     if (selNodes.size) {
       const ids = [...selNodes];
-      const setColor = (c) => {
+      items.push(colorSubmenu('Node colour', (c) => {
         history.push();
         for (const id of ids) setNodeColor(model, id, c);
         render();
-      };
-      items.push({
-        label: 'Node colour',
-        submenu: [
-          ...NODE_COLORS.map((c) => ({
-            label: c.name,
-            swatch: c.value,
-            action: () => setColor(c.value),
-          })),
-          { label: 'Default', action: () => setColor(null) },
-        ],
-      });
+      }));
     }
     items.push(
       {
@@ -2705,7 +2730,7 @@ function setupInteractions(model, renderer, render, history) {
     // it. Checked early: the grips live in the top overlay layer, above nodes.
     const gripG = closest(e, 'data-resize-group');
     if (gripG) {
-      const group = (model.groups || []).find((g) => g.id === gripG.dataset.resizeGroup);
+      const group = findGroup(model, gripG.dataset.resizeGroup);
       if (!group) return;
       const p = screenToGraph(e.clientX, e.clientY);
       drag = {
@@ -2727,7 +2752,7 @@ function setupInteractions(model, renderer, render, history) {
     // single click; an existing label drags along the edge, double-click edits it
     const lbl = closest(e, 'data-edgelabel');
     if (lbl) {
-      const edge = model.edges.find((ed) => ed.id === lbl.dataset.edgelabel);
+      const edge = findEdge(model, lbl.dataset.edgelabel);
       if (!edge) return;
       select(null, edge.id);
       if (!edge.label) {
@@ -2745,7 +2770,7 @@ function setupInteractions(model, renderer, render, history) {
     // segment handle of the selected edge → slide that straight run
     const seg = closest(e, 'data-seg');
     if (seg) {
-      const edge = model.edges.find((ed) => ed.id === seg.dataset.edge);
+      const edge = findEdge(model, seg.dataset.edge);
       if (!edge) return;
       select(null, edge.id);
       const p = screenToGraph(e.clientX, e.clientY);
@@ -2763,7 +2788,7 @@ function setupInteractions(model, renderer, render, history) {
 
     const port = closest(e, 'data-port');
     if (port) {
-      const node = model.nodes.find((n) => n.id === port.dataset.node);
+      const node = findNode(model, port.dataset.node);
       const param = node && node.params.find((p) => p.id === port.dataset.param);
       if (!node || !param) return;
       drag = {
@@ -2780,7 +2805,7 @@ function setupInteractions(model, renderer, render, history) {
     // slides the port along the group's border (attached edges follow).
     const gportEl = closest(e, 'data-gport');
     if (gportEl) {
-      const group = (model.groups || []).find((g) => g.id === gportEl.dataset.gport);
+      const group = findGroup(model, gportEl.dataset.gport);
       const gport = group && (group.ports || []).find((p) => p.id === gportEl.dataset.gportId);
       if (!group || !gport) return;
       drag = {
@@ -2799,7 +2824,7 @@ function setupInteractions(model, renderer, render, history) {
     const paramRow = closest(e, 'data-paramrow');
     if (paramRow) {
       const nodeG = closest(e, 'data-node');
-      const node = nodeG && model.nodes.find((n) => n.id === nodeG.dataset.node);
+      const node = nodeG && findNode(model, nodeG.dataset.node);
       const param = node && node.params.find((p) => p.id === paramRow.dataset.paramrow);
       if (!node || !param) return;
       const p = screenToGraph(e.clientX, e.clientY);
@@ -2816,7 +2841,7 @@ function setupInteractions(model, renderer, render, history) {
 
     const nodeG = closest(e, 'data-node');
     if (nodeG) {
-      const node = model.nodes.find((n) => n.id === nodeG.dataset.node);
+      const node = findNode(model, nodeG.dataset.node);
       if (!node) return;
       closeMenu();
       const p = screenToGraph(e.clientX, e.clientY);
@@ -2829,28 +2854,14 @@ function setupInteractions(model, renderer, render, history) {
 
       if (e.shiftKey) {
         // shift-click toggles membership; a drag afterwards moves the group
-        if (selNodes.has(node.id)) selNodes.delete(node.id);
-        else selNodes.add(node.id);
-        selEdge = null;
-        render();
+        toggleSelect(selNodes, node.id);
         drag = { kind: 'maybe-node', id: node.id, ox: p.x, oy: p.y };
         return;
       }
       if (!selNodes.has(node.id)) select(node.id, null);
       else closeEditor();
       // dragging one node of a multi-selection moves the whole selection
-      const ids = [...selNodes];
-      drag = {
-        kind: 'node',
-        ids,
-        dx: p.x,
-        dy: p.y,
-        pre: history.begin(),
-        origins: new Map(ids.map((id) => {
-          const n = model.nodes.find((m) => m.id === id);
-          return [id, { x: n.x, y: n.y }];
-        })),
-      };
+      nodeDrag([...selNodes], p);
       return;
     }
 
@@ -2888,14 +2899,11 @@ function setupInteractions(model, renderer, render, history) {
     const groupG = closest(e, 'data-group');
     if (groupG) {
       const p = screenToGraph(e.clientX, e.clientY);
-      const group = innermostGroupAt(model, p.x, p.y) || (model.groups || []).find((g) => g.id === groupG.dataset.group);
+      const group = innermostGroupAt(model, p.x, p.y) || findGroup(model, groupG.dataset.group);
       if (!group) return;
       closeMenu();
       if (e.shiftKey) {
-        if (selGroups.has(group.id)) selGroups.delete(group.id);
-        else selGroups.add(group.id);
-        selEdge = null;
-        render();
+        toggleSelect(selGroups, group.id);
         drag = { kind: 'maybe-group', id: group.id, ox: p.x, oy: p.y };
         return;
       }
@@ -2949,7 +2957,7 @@ function setupInteractions(model, renderer, render, history) {
 
   // Draw (or move) the insertion line for the active param-reorder drag.
   const updateParamIndicator = () => {
-    const node = model.nodes.find((n) => n.id === drag.nodeId);
+    const node = findNode(model, drag.nodeId);
     if (!node) return;
     const gap = paramGapAt(node, drag.cy);
     drag.gap = gap;
@@ -2965,21 +2973,21 @@ function setupInteractions(model, renderer, render, history) {
       view.x = drag.vx + (e.clientX - drag.sx);
       view.y = drag.vy + (e.clientY - drag.sy);
       renderer.setView(view);
-    } else if (drag.kind === 'maybe-node') {
+    } else if (drag.kind === 'maybe-node' || drag.kind === 'maybe-group' || drag.kind === 'maybe-paramrow') {
+      // Deferred drags: promote to a real drag only once the pointer has moved
+      // past a small threshold — a press that never moves stays a click.
       const p = screenToGraph(e.clientX, e.clientY);
       if (Math.hypot(p.x - drag.ox, p.y - drag.oy) < 3) return;
-      if (!selNodes.has(drag.id)) selNodes.add(drag.id);
-      startNodeDrag(p);
-    } else if (drag.kind === 'maybe-group') {
-      const p = screenToGraph(e.clientX, e.clientY);
-      if (Math.hypot(p.x - drag.ox, p.y - drag.oy) < 3) return;
-      if (!selGroups.has(drag.id)) selGroups.add(drag.id);
-      drag = { kind: 'group', id: drag.id, ox: p.x, oy: p.y, scope: groupScope(), pre: history.begin() };
-    } else if (drag.kind === 'maybe-paramrow') {
-      const p = screenToGraph(e.clientX, e.clientY);
-      if (Math.hypot(p.x - drag.ox, p.y - drag.oy) < 3) return;
-      drag = { kind: 'param-reorder', nodeId: drag.nodeId, paramId: drag.paramId, fromIndex: drag.fromIndex, cx: p.x, cy: p.y, gap: drag.fromIndex, pre: history.begin() };
-      updateParamIndicator();
+      if (drag.kind === 'maybe-node') {
+        if (!selNodes.has(drag.id)) selNodes.add(drag.id);
+        startNodeDrag(p);
+      } else if (drag.kind === 'maybe-group') {
+        if (!selGroups.has(drag.id)) selGroups.add(drag.id);
+        drag = { kind: 'group', id: drag.id, ox: p.x, oy: p.y, scope: groupScope(), pre: history.begin() };
+      } else {
+        drag = { kind: 'param-reorder', nodeId: drag.nodeId, paramId: drag.paramId, fromIndex: drag.fromIndex, cx: p.x, cy: p.y, gap: drag.fromIndex, pre: history.begin() };
+        updateParamIndicator();
+      }
     } else if (drag.kind === 'param-reorder') {
       const p = screenToGraph(e.clientX, e.clientY);
       drag.cx = p.x;
@@ -3001,7 +3009,7 @@ function setupInteractions(model, renderer, render, history) {
         render(true);
       }
     } else if (drag.kind === 'resize-group') {
-      const group = (model.groups || []).find((g) => g.id === drag.id);
+      const group = findGroup(model, drag.id);
       if (!group) return;
       const p = screenToGraph(e.clientX, e.clientY);
       // The dragged corner moves; the OPPOSITE corner stays fixed. The moving
@@ -3038,36 +3046,24 @@ function setupInteractions(model, renderer, render, history) {
       // grid line (not just the cursor delta), so off-grid nodes snap in too
       const sx = p.x - drag.dx;
       const sy = p.y - drag.dy;
-      // Waypoints are absolute, so remember where the ports of any connected
-      // edge were before this step — afterwards the waypoint runs adjacent to
-      // those ports translate with them (otherwise moving a node detaches the
-      // route and the renderer bridges the gap by spawning extra segments).
+      // Waypoints are absolute, so the waypoint runs adjacent to the moved
+      // nodes' ports translate with them (followWaypoints) — otherwise moving
+      // a node detaches the route and the renderer bridges the gap by spawning
+      // extra segments.
       const moved = new Set(drag.ids);
-      const prevEnds = new Map();
-      for (const edge of model.edges) {
-        if (!moved.has(edge.source.node) && !moved.has(edge.target.node)) continue;
-        const ends = edgeEnds(model, edge);
-        if (ends && edge.points.length) prevEnds.set(edge.id, { a: { ...ends.a }, b: { ...ends.b } });
-      }
-      for (const id of drag.ids) {
-        const node = model.nodes.find((n) => n.id === id);
-        const o = drag.origins.get(id);
-        if (node && o) {
-          node.x = snapToGrid(o.x + sx);
-          node.y = snapToGrid(o.y + sy);
+      followWaypoints(model, (edge) => moved.has(edge.source.node) || moved.has(edge.target.node), () => {
+        for (const id of drag.ids) {
+          const node = findNode(model, id);
+          const o = drag.origins.get(id);
+          if (node && o) {
+            node.x = snapToGrid(o.x + sx);
+            node.y = snapToGrid(o.y + sy);
+          }
         }
-      }
-      for (const edge of model.edges) {
-        const prev = prevEnds.get(edge.id);
-        if (!prev) continue;
-        const ends = edgeEnds(model, edge);
-        if (!ends) continue;
-        const next = adjustPointsForMove(edge.points, ends.a, ends.b, prev.a, prev.b);
-        setEdgePoints(model, edge.id, next);
-      }
+      });
       render(true);
     } else if (drag.kind === 'resize') {
-      const node = model.nodes.find((n) => n.id === drag.id);
+      const node = findNode(model, drag.id);
       if (!node) return;
       const p = screenToGraph(e.clientX, e.clientY);
       // the new width snaps to the grid so the right edge stays on a grid line
@@ -3078,7 +3074,7 @@ function setupInteractions(model, renderer, render, history) {
         render();
       }
     } else if (drag.kind === 'gport-move') {
-      const group = (model.groups || []).find((g) => g.id === drag.groupId);
+      const group = findGroup(model, drag.groupId);
       if (!group) return;
       const gport = (group.ports || []).find((p) => p.id === drag.portId);
       if (!gport) return;
@@ -3092,16 +3088,10 @@ function setupInteractions(model, renderer, render, history) {
       const t = span > 0 ? (along - lo) / span : gport.t;
       if (t === gport.t) return;
       // the waypoint runs glued to the port follow it, exactly as when a node
-      // moves: snapshot the drawn endpoints, mutate t, translate the runs
-      const prevEnds = groupPortEnds(model, group.id);
-      gport.t = t;
-      for (const edge of model.edges) {
-        const prev = prevEnds.get(edge.id);
-        if (!prev) continue;
-        const ends = edgeEnds(model, edge);
-        if (!ends) continue;
-        edge.points = adjustPointsForMove(edge.points, ends.a, ends.b, prev.a, prev.b);
-      }
+      // moves
+      followWaypoints(model, (edge) => edge.source.group === group.id || edge.target.group === group.id, () => {
+        gport.t = t;
+      });
       render();
     } else if (drag.kind === 'connect') {
       const p = screenToGraph(e.clientX, e.clientY);
@@ -3111,7 +3101,7 @@ function setupInteractions(model, renderer, render, history) {
       renderer.tempPath.setAttribute('d', edgePath(from, to));
       updateConnectCue(p, e.clientX, e.clientY);
     } else if (drag.kind === 'segment') {
-      const edge = model.edges.find((ed) => ed.id === drag.edgeId);
+      const edge = findEdge(model, drag.edgeId);
       if (!edge) return;
       const ends = edgeEnds(model, edge);
       if (!ends) return;
@@ -3120,7 +3110,7 @@ function setupInteractions(model, renderer, render, history) {
       setEdgePoints(model, edge.id, next);
       render();
     } else if (drag.kind === 'label') {
-      const edge = model.edges.find((ed) => ed.id === drag.edgeId);
+      const edge = findEdge(model, drag.edgeId);
       if (!edge) return;
       const ends = edgeEnds(model, edge);
       if (!ends) return;
@@ -3165,20 +3155,7 @@ function setupInteractions(model, renderer, render, history) {
     }
   };
 
-  const startNodeDrag = (p) => {
-    const ids = [...selNodes];
-    drag = {
-      kind: 'node',
-      ids,
-      dx: p.x,
-      dy: p.y,
-      pre: history.begin(),
-      origins: new Map(ids.map((id) => {
-        const n = model.nodes.find((m) => m.id === id);
-        return [id, { x: n.x, y: n.y }];
-      })),
-    };
-  };
+  const startNodeDrag = (p) => nodeDrag([...selNodes], p);
 
   // --- connect-drag cue: where would a group boundary port land? ---
   // While dragging an edge, hovering a group's border previews the drop: the
@@ -3210,6 +3187,23 @@ function setupInteractions(model, renderer, render, history) {
     el('circle', { cx: cand.x, cy: cand.y, r: 5, class: 'ng-port-ghost' }, renderer.indicatorLayer);
   };
 
+  // Orient a drop so the edge always runs out → in, whichever end the drag
+  // started from. Returns [source, target] for `target` as the drop end.
+  const orient = (target) => (drag.originPort === 'out' ? [drag.source, target] : [target, drag.source]);
+
+  // Wire an edge, recording one undo step. A failed connect (duplicate,
+  // self-loop…) toasts the reason and records nothing. `pre` may be a
+  // history.begin() snapshot taken earlier (e.g. before a boundary port is
+  // created) so the whole gesture stays a single undo step.
+  const tryConnect = (src, dst, pre = history.begin()) => {
+    try {
+      connect(model, src, dst);
+      history.end(pre);
+    } catch (err) {
+      toast(err.message);
+    }
+  };
+
   const onPointerUp = (e) => {
     if (!drag) return;
     svg.classList.remove('ng-panning');
@@ -3229,27 +3223,12 @@ function setupInteractions(model, renderer, render, history) {
         if (port.dataset.port === drag.originPort) {
           toast('Connect an output port to an input port');
         } else {
-          const [src, dst] = drag.originPort === 'out' ? [drag.source, target] : [target, drag.source];
-          const pre = history.begin();
-          try {
-            connect(model, src, dst);
-            history.end(pre);
-          } catch (err) {
-            toast(err.message);
-          }
+          tryConnect(...orient(target));
         }
       } else if (gportEl && svg.contains(gportEl)) {
         // dropped on an existing group boundary port — the group is a
         // bidirectional interface, so the drag's origin side wins the direction
-        const target = { group: gportEl.dataset.gport, port: gportEl.dataset.gportId };
-        const [src, dst] = drag.originPort === 'in' ? [target, drag.source] : [drag.source, target];
-        const pre = history.begin();
-        try {
-          connect(model, src, dst);
-          history.end(pre);
-        } catch (err) {
-          toast(err.message);
-        }
+        tryConnect(...orient({ group: gportEl.dataset.gport, port: gportEl.dataset.gportId }));
       } else {
         // dropped on empty space: if the cursor rests on a group's border, the
         // cue's candidate becomes real — create a boundary port there and wire
@@ -3259,14 +3238,7 @@ function setupInteractions(model, renderer, render, history) {
         if (cand) {
           const pre = history.begin(); // before the port is created
           const port = addGroupPort(model, cand.group.id, { side: cand.side, t: cand.t });
-          const target = { group: cand.group.id, port: port.id };
-          const [src, dst] = drag.originPort === 'in' ? [target, drag.source] : [drag.source, target];
-          try {
-            connect(model, src, dst);
-            history.end(pre);
-          } catch (err) {
-            toast(err.message);
-          }
+          tryConnect(...orient({ group: cand.group.id, port: port.id }), pre);
         }
       }
       render();
@@ -3284,16 +3256,13 @@ function setupInteractions(model, renderer, render, history) {
       // never moved → it was a plain click on the row: select the node
       // (shift toggles it into the multi-selection, like clicking the header)
       if (e.shiftKey) {
-        if (selNodes.has(drag.nodeId)) selNodes.delete(drag.nodeId);
-        else selNodes.add(drag.nodeId);
-        selEdge = null;
-        render();
+        toggleSelect(selNodes, drag.nodeId);
       } else if (!selNodes.has(drag.nodeId)) {
         select(drag.nodeId, null);
       }
     } else if (drag.kind === 'param-reorder') {
       renderer.indicatorLayer.textContent = '';
-      const node = model.nodes.find((n) => n.id === drag.nodeId);
+      const node = findNode(model, drag.nodeId);
       if (node && drag.gap != null) {
         // the gap index counts insertion slots; removing the dragged row first
         // shifts later slots down by one, so the final index is gap or gap-1
@@ -3301,21 +3270,9 @@ function setupInteractions(model, renderer, render, history) {
         if (to !== drag.fromIndex) {
           // Reordering moves a param's port (its y), so translate the waypoint
           // runs glued to that node's ports — same dance as a node move.
-          const moved = new Set([node.id]);
-          const prevEnds = new Map();
-          for (const edge of model.edges) {
-            if (!moved.has(edge.source.node) && !moved.has(edge.target.node)) continue;
-            const ends = edgeEnds(model, edge);
-            if (ends && edge.points.length) prevEnds.set(edge.id, { a: { ...ends.a }, b: { ...ends.b } });
-          }
-          moveParam(model, node.id, drag.paramId, to);
-          for (const edge of model.edges) {
-            const prev = prevEnds.get(edge.id);
-            if (!prev) continue;
-            const ends = edgeEnds(model, edge);
-            if (!ends) continue;
-            setEdgePoints(model, edge.id, adjustPointsForMove(edge.points, ends.a, ends.b, prev.a, prev.b));
-          }
+          followWaypoints(model, (edge) => edge.source.node === node.id || edge.target.node === node.id, () => {
+            moveParam(model, node.id, drag.paramId, to);
+          });
           render();
         }
       }
@@ -3342,7 +3299,7 @@ function setupInteractions(model, renderer, render, history) {
     const ctx = {};
     if (gportEl) {
       // the port under the cursor is menu context (Delete port), not a selection
-      const group = (model.groups || []).find((g) => g.id === gportEl.dataset.gport);
+      const group = findGroup(model, gportEl.dataset.gport);
       const port = group && (group.ports || []).find((p) => p.id === gportEl.dataset.gportId);
       if (group && port) {
         ctx.group = group;
@@ -3358,14 +3315,8 @@ function setupInteractions(model, renderer, render, history) {
     (e) => {
       e.preventDefault();
       const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-      const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, view.scale * factor));
       const r = svg.getBoundingClientRect();
-      const px = e.clientX - r.left;
-      const py = e.clientY - r.top;
-      view.x = px - ((px - view.x) / view.scale) * scale;
-      view.y = py - ((py - view.y) / view.scale) * scale;
-      view.scale = scale;
-      renderer.setView(view);
+      zoomAt(e.clientX - r.left, e.clientY - r.top, view.scale * factor);
       closeEditor(); // editor position would be stale after zoom
     },
     { passive: false }
@@ -3392,7 +3343,7 @@ function setupInteractions(model, renderer, render, history) {
     // double-click a segment handle → collapse that straight run
     const seg = hit('data-seg');
     if (seg) {
-      const edge = model.edges.find((ed) => ed.id === seg.dataset.edge);
+      const edge = findEdge(model, seg.dataset.edge);
       if (edge) {
         const ends = edgeEnds(model, edge);
         if (ends) {
@@ -3406,14 +3357,14 @@ function setupInteractions(model, renderer, render, history) {
     // double-click an edge label / hint → edit the label
     const lbl = hit('data-edgelabel');
     if (lbl) {
-      const edge = model.edges.find((ed) => ed.id === lbl.dataset.edgelabel);
+      const edge = findEdge(model, lbl.dataset.edgelabel);
       if (edge) editLabel(edge, lbl);
       return;
     }
 
     const edgeEl = hit('data-edge');
     if (edgeEl) {
-      const edge = model.edges.find((ed) => ed.id === edgeEl.dataset.edge);
+      const edge = findEdge(model, edgeEl.dataset.edge);
       if (edge) {
         select(null, edge.id);
         editLabel(edge, null);
@@ -3423,7 +3374,7 @@ function setupInteractions(model, renderer, render, history) {
 
     const nodeG = hit('data-node');
     if (nodeG) {
-      const node = model.nodes.find((n) => n.id === nodeG.dataset.node);
+      const node = findNode(model, nodeG.dataset.node);
       if (!node) return;
       select(node.id, null);
       const paramG = target.closest ? target.closest('[data-param]') : null;
@@ -3436,7 +3387,7 @@ function setupInteractions(model, renderer, render, history) {
     // double-click a group (its body or label) → rename it
     const groupG = hit('data-group');
     if (groupG) {
-      const group = (model.groups || []).find((g) => g.id === groupG.dataset.group);
+      const group = findGroup(model, groupG.dataset.group);
       if (group) {
         select(null, null, group.id);
         editGroup(group);
@@ -3463,7 +3414,7 @@ function setupInteractions(model, renderer, render, history) {
       case 'add-param': {
         const param = addParam(model, nodeId, { name: 'param' });
         render();
-        const node = model.nodes.find((n) => n.id === nodeId);
+        const node = findNode(model, nodeId);
         if (param && node) editParam(node, param);
         return;
       }
@@ -3539,6 +3490,7 @@ function setupInteractions(model, renderer, render, history) {
     screenToGraph,
     fitView,
     resetView,
+    zoomAt,
     getSelectedEdge: () => selEdge,
     getSelectedNodes: () => selNodes,
     getSelectedGroups: () => selGroups,
@@ -3637,21 +3589,8 @@ export function textWidth(text, size, bold) {
 // '#rgb' | '#rrggbb' | '#rrggbbaa' | 'rgb(...)' → 'r g b' in 0..1 for PDF.
 // Alpha is dropped (the page background is painted first).
 function colorOps(value) {
-  const s = String(value || '').trim();
-  let m = /^#([0-9a-f]{3})$/i.exec(s);
-  if (m) {
-    const [r, g, b] = m[1].split('').map((h) => parseInt(h + h, 16) / 255);
-    return `${f(r)} ${f(g)} ${f(b)}`;
-  }
-  m = /^#([0-9a-f]{6})/i.exec(s);
-  if (m) {
-    const n = m[1].slice(0, 6);
-    const [r, g, b] = [0, 2, 4].map((i) => parseInt(n.slice(i, i + 2), 16) / 255);
-    return `${f(r)} ${f(g)} ${f(b)}`;
-  }
-  m = /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)/i.exec(s);
-  if (m) return `${f(m[1] / 255)} ${f(m[2] / 255)} ${f(m[3] / 255)}`;
-  return '0 0 0';
+  const { r, g, b } = parseColor(value);
+  return `${f(r / 255)} ${f(g / 255)} ${f(b / 255)}`;
 }
 
 const f = (n) => (Math.round(n * 1000) / 1000).toString();
@@ -3667,6 +3606,13 @@ function makeTransform(bbox, margin) {
   };
 }
 
+// Path-building primitives over a transform: P emits a transformed point, C a
+// transformed bezier curve segment. Shared by rectPath / circlePath / arrowPath.
+const pathHelpers = (t) => ({
+  P: (x, y) => `${t.x(x)} ${t.y(y)}`,
+  C: (a, b, c, d, e, g) => `${t.x(a)} ${t.y(b)} ${t.x(c)} ${t.y(d)} ${t.x(e)} ${t.y(g)} c`,
+});
+
 // Rounded rectangle as a path in scene coords (corners clamped to half the
 // side length so degenerate rects stay valid). `r` is either a single radius
 // for all four corners or { tl, tr, br, bl } for per-corner radii (node
@@ -3677,9 +3623,7 @@ function rectPath(t, x, y, w, h, r) {
   const tr = clamp(typeof r === 'object' && r ? r.tr : r);
   const br = clamp(typeof r === 'object' && r ? r.br : r);
   const bl = clamp(typeof r === 'object' && r ? r.bl : r);
-  const P = (px, py) => `${t.x(px)} ${t.y(py)}`;
-  const C = (a, b, c, d, e, g) =>
-    `${t.x(a)} ${t.y(b)} ${t.x(c)} ${t.y(d)} ${t.x(e)} ${t.y(g)} c`;
+  const { P, C } = pathHelpers(t);
   if (tl + tr + br + bl <= 0) return `${P(x, y)} m ${P(x + w, y)} l ${P(x + w, y + h)} l ${P(x, y + h)} l h `;
   return (
     `${P(x + tl, y)} m ` +
@@ -3698,9 +3642,7 @@ function rectPath(t, x, y, w, h, r) {
 // Circle as four bezier arcs (ports).
 function circlePath(t, cx, cy, r) {
   const k = r * KAPPA;
-  const P = (px, py) => `${t.x(px)} ${t.y(py)}`;
-  const C = (a, b, c, d, e, g) =>
-    `${t.x(a)} ${t.y(b)} ${t.x(c)} ${t.y(d)} ${t.x(e)} ${t.y(g)} c`;
+  const { P, C } = pathHelpers(t);
   return (
     `${P(cx + r, cy)} m ` +
     C(cx + r, cy + k, cx + k, cy + r, cx, cy + r) + ' ' +
@@ -3722,7 +3664,7 @@ function arrowPath(t, pts, size = 9, half = 3.5) {
   const py = ux;
   const bx = b.x - ux * size;
   const by = b.y - uy * size;
-  const P = (x, y) => `${t.x(x)} ${t.y(y)}`;
+  const { P } = pathHelpers(t);
   return (
     `${P(b.x, b.y)} m ${P(bx + px * half, by + py * half)} l ` +
     `${P(bx - px * half, by - py * half)} l h `
@@ -3733,14 +3675,9 @@ function arrowPath(t, pts, size = 9, half = 3.5) {
 // margin is clear space even from stroke edges), so the page can be framed
 // tightly.
 function sceneBounds(scene) {
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const bb = bbox();
   let maxStroke = 0;
-  const grow = (x, y) => {
-    if (x < minX) minX = x;
-    if (y < minY) minY = y;
-    if (x > maxX) maxX = x;
-    if (y > maxY) maxY = y;
-  };
+  const grow = (x, y) => bb.grow(x, y);
   const stroke = (w) => { maxStroke = Math.max(maxStroke, n(w) || 0); };
   for (const r of scene.rects || []) {
     stroke(r.strokeWidth);
@@ -3764,12 +3701,13 @@ function sceneBounds(scene) {
     grow(x0, n(tx.y) - h);
     grow(x0 + w, n(tx.y) + h * 0.25);
   }
-  if (!Number.isFinite(minX)) return { minX: 0, minY: 0, maxX: 0, maxY: 0, w: 0, h: 0 };
+  const b = bb.box();
+  if (!b) return { minX: 0, minY: 0, maxX: 0, maxY: 0, w: 0, h: 0 };
   const pad = maxStroke / 2;
-  minX -= pad;
-  minY -= pad;
-  maxX += pad;
-  maxY += pad;
+  const minX = b.x0 - pad;
+  const minY = b.y0 - pad;
+  const maxX = b.x1 + pad;
+  const maxY = b.y1 + pad;
   return { minX, minY, maxX, maxY, w: maxX - minX, h: maxY - minY };
 }
 
@@ -3785,18 +3723,21 @@ export function buildPDF(scene = {}) {
   // page background, so the PDF matches the canvas rather than being transparent
   ops.push(`${colorOps(scene.background)} rg 0 0 ${f(pageW)} ${f(pageH)} re f `);
 
+  // paint one filled/stroked shape: colour ops, then the path, then the
+  // paint operator (fill+stroke / fill / stroke)
+  const emitShape = (shape, path) => {
+    if (shape.fill) ops.push(`${colorOps(shape.fill)} rg `);
+    if (shape.stroke) ops.push(`${colorOps(shape.stroke)} RG ${f(shape.strokeWidth || 1)} w `);
+    ops.push(path);
+    ops.push(shape.fill && shape.stroke ? 'B ' : shape.fill ? 'f ' : 'S ');
+  };
+
   for (const r of scene.rects || []) {
-    if (r.fill) ops.push(`${colorOps(r.fill)} rg `);
-    if (r.stroke) ops.push(`${colorOps(r.stroke)} RG ${f(r.strokeWidth || 1)} w `);
-    ops.push(rectPath(t, n(r.x), n(r.y), n(r.w), n(r.h), r.r));
-    ops.push(r.fill && r.stroke ? 'B ' : r.fill ? 'f ' : 'S ');
+    emitShape(r, rectPath(t, n(r.x), n(r.y), n(r.w), n(r.h), r.r));
   }
 
   for (const c of scene.circles || []) {
-    if (c.fill) ops.push(`${colorOps(c.fill)} rg `);
-    if (c.stroke) ops.push(`${colorOps(c.stroke)} RG ${f(c.strokeWidth || 1)} w `);
-    ops.push(circlePath(t, n(c.x), n(c.y), n(c.r)));
-    ops.push(c.fill && c.stroke ? 'B ' : c.fill ? 'f ' : 'S ');
+    emitShape(c, circlePath(t, n(c.x), n(c.y), n(c.r)));
   }
 
   for (const p of scene.paths || []) {
@@ -3896,93 +3837,45 @@ export function createGraph(container) {
   // Waypoints are stored in absolute graph coords, so any API that moves a
   // port (moveNode, add/removeParam) must translate the waypoint runs glued to
   // it — otherwise the route detaches and the renderer bridges the gap by
-  // spawning extra segments. Snapshot the ports of affected edges, mutate,
-  // then shift.
-  const portOf = (ref, side) => {
-    const node = findNode(model, ref.node);
-    const param = node && node.params.find((p) => p.id === ref.param);
-    return node && param ? portPos(node, param, side) : null;
-  };
+  // spawning extra segments. Delegates to the model's followWaypoints.
   const followPorts = (nodeIds, mutate) => {
     const moved = new Set(nodeIds);
-    const prev = new Map();
-    for (const edge of model.edges) {
-      if (!edge.points.length) continue;
-      if (!moved.has(edge.source.node) && !moved.has(edge.target.node)) continue;
-      prev.set(edge.id, { a: portOf(edge.source, 'out'), b: portOf(edge.target, 'in') });
-    }
-    const result = mutate();
-    for (const edge of model.edges) {
-      const p = prev.get(edge.id);
-      if (!p || !p.a || !p.b) continue;
-      const a = portOf(edge.source, 'out');
-      const b = portOf(edge.target, 'in');
-      if (a && b) edge.points = adjustPointsForMove(edge.points, a, b, p.a, p.b);
-    }
+    return followWaypoints(model, (edge) => moved.has(edge.source.node) || moved.has(edge.target.node), mutate);
+  };
+
+  // Public-method factory: run a MODEL function as one undo step, re-render,
+  // and return its result. `follow: true` marks methods that move a node's
+  // ports (the node id is the first argument) so glued waypoint runs track them.
+  const api = (fn, { follow = false } = {}) => (...args) => {
+    const mutate = () => fn(model, ...args);
+    const result = withHistory(follow ? () => followPorts([args[0]], mutate) : mutate);
+    render();
     return result;
   };
 
   return {
     // --- nodes ---
-    addNode(opts) {
-      const node = withHistory(() => addNode(model, opts));
-      render();
-      return node;
-    },
-    removeNode(id) {
-      withHistory(() => removeNode(model, id));
-      render();
-    },
-    setNodeLabel(id, label) {
-      withHistory(() => setNodeLabel(model, id, label));
-      render();
-    },
-    moveNode(id, x, y) {
-      withHistory(() => followPorts([id], () => moveNode(model, id, x, y)));
-      render();
-    },
-    setNodeWidth(id, width) {
-      withHistory(() => followPorts([id], () => setNodeWidth(model, id, width)));
-      render();
-    },
-    setNodeColor(id, color) {
-      withHistory(() => setNodeColor(model, id, color));
-      render();
-    },
+    addNode: api(addNode),
+    removeNode: api(removeNode),
+    setNodeLabel: api(setNodeLabel),
+    moveNode: api(moveNode, { follow: true }),
+    setNodeWidth: api(setNodeWidth, { follow: true }),
+    setNodeColor: api(setNodeColor),
 
     // --- groups ---
     // A labelled rectangle drawn underneath the nodes. Membership is geometric:
     // a node belongs to the group while its centre is inside the box, so moving
     // a group carries its members along (relatively) and resizing reveals or
     // hides nodes without ever deleting them.
-    addGroup(opts) {
-      const group = withHistory(() => addGroup(model, opts));
-      render();
-      return group;
-    },
-    removeGroup(id) {
-      withHistory(() => removeGroup(model, id));
-      render();
-    },
-    setGroupLabel(id, label) {
-      withHistory(() => setGroupLabel(model, id, label));
-      render();
-    },
-    setGroupColor(id, color) {
-      withHistory(() => setGroupColor(model, id, color));
-      render();
-    },
+    addGroup: api(addGroup),
+    removeGroup: api(removeGroup),
+    setGroupLabel: api(setGroupLabel),
+    setGroupColor: api(setGroupColor),
     // Fill on/off. With fill off the group is an outline only: transparent
     // interior, and clicks inside it pass through to the canvas (only the
     // border selects/moves the group).
-    setGroupFill(id, on) {
-      withHistory(() => setGroupFill(model, id, on));
-      render();
-    },
-    setGroupRect(id, rect) {
-      withHistory(() => setGroupRect(model, id, rect));
-      render();
-    },
+    setGroupFill: api(setGroupFill),
+    setGroupRect: api(setGroupRect),
     // Move the group to (x, y) and translate every member node — and every
     // nested group and its members — by the same delta.
     moveGroup(id, x, y) {
@@ -4003,59 +3896,26 @@ export function createGraph(container) {
     // stores a side and a relative position t (0..1), so it slides with the
     // border when the group is resized. Dragging an edge onto a group's border
     // creates one automatically; these are the programmatic equivalents.
-    addGroupPort(groupId, opts) {
-      const port = withHistory(() => addGroupPort(model, groupId, opts));
-      render();
-      return port;
-    },
-    removeGroupPort(groupId, portId) {
-      withHistory(() => removeGroupPort(model, groupId, portId));
-      render();
-    },
+    addGroupPort: api(addGroupPort),
+    removeGroupPort: api(removeGroupPort),
     getGroupPorts(groupId) {
       const group = findGroup(model, groupId);
       return group ? group.ports || [] : [];
     },
 
     // --- parameters ---
-    addParam(nodeId, opts) {
-      const param = withHistory(() => followPorts([nodeId], () => addParam(model, nodeId, opts)));
-      render();
-      return param;
-    },
-    removeParam(nodeId, paramId) {
-      withHistory(() => followPorts([nodeId], () => removeParam(model, nodeId, paramId)));
-      render();
-    },
+    addParam: api(addParam, { follow: true }),
+    removeParam: api(removeParam, { follow: true }),
     // Reorder a param row (dragging the row in the UI does the same). The param
     // keeps its id, so edges follow; only the row — and its port's y — moves.
-    moveParam(nodeId, paramId, toIndex) {
-      withHistory(() => followPorts([nodeId], () => moveParam(model, nodeId, paramId, toIndex)));
-      render();
-    },
+    moveParam: api(moveParam, { follow: true }),
 
     // --- edges ---
-    connect(source, target) {
-      const edge = withHistory(() => connect(model, source, target));
-      render();
-      return edge;
-    },
-    removeEdge(id) {
-      withHistory(() => removeEdge(model, id));
-      render();
-    },
-    setEdgeLabel(id, label) {
-      withHistory(() => setEdgeLabel(model, id, label));
-      render();
-    },
-    setEdgeColor(id, color) {
-      withHistory(() => setEdgeColor(model, id, color));
-      render();
-    },
-    setEdgeLabelT(id, t) {
-      withHistory(() => setEdgeLabelT(model, id, t));
-      render();
-    },
+    connect: api(connect),
+    removeEdge: api(removeEdge),
+    setEdgeLabel: api(setEdgeLabel),
+    setEdgeColor: api(setEdgeColor),
+    setEdgeLabelT: api(setEdgeLabelT),
 
     // --- undo / redo ---
     // Step back/forward through the last HISTORY_LIMIT changes (UI gestures and
@@ -4106,13 +3966,7 @@ export function createGraph(container) {
     },
     zoomTo(scale) {
       const r = renderer.svg.getBoundingClientRect();
-      const px = r.width / 2;
-      const py = r.height / 2;
-      const s = Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale));
-      interactions.view.x = px - ((px - interactions.view.x) / interactions.view.scale) * s;
-      interactions.view.y = py - ((py - interactions.view.y) / interactions.view.scale) * s;
-      interactions.view.scale = s;
-      renderer.setView(interactions.view);
+      interactions.zoomAt(r.width / 2, r.height / 2, scale);
     },
     // Zoom so all content (nodes, groups, routed edges) fits the canvas,
     // centred with clear space around it.

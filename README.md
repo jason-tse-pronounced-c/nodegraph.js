@@ -1,8 +1,15 @@
-# nodegraph.js
+# nodegraph.lib
 
 A zero-dependency visual node-graph editor in a single ES module. No build step,
 no framework, no runtime dependencies — drop `nodegraph.js` next to your page and
 import it. The stylesheet is embedded and injected automatically on first import.
+
+Everything is plain SVG + DOM: orthogonal auto-routed edges, draggable nodes with
+input/output param rows, geometric groups with boundary ports, undo/redo history,
+copy/paste, JSON persistence, and one-click vector PDF export. Themes are CSS
+custom properties.
+
+## Quick start
 
 ```html
 <div id="app" style="position:absolute; inset:0"></div>
@@ -16,29 +23,149 @@ import it. The stylesheet is embedded and injected automatically on first import
 </script>
 ```
 
-Try it: `node server.js 8123` → http://localhost:8123/demo.html
+Try the demo: `node server.js 8123` → http://localhost:8123/ — a showcase graph
+with colored nodes, labeled/colored edges, nested groups, and boundary ports.
 
-## Where to read
+## Features
 
-Everything lives in `nodegraph.js`, in seven clearly-marked sections. The
-pointers below (e.g. *→ PUBLIC API*) name the section to read for full details;
-line numbers are approximate and drift with edits, so search for the banner.
+- **Nodes** with param rows — every row has an input port (left) and an output
+  port (right). Resize (`width`, or drag the right-edge grip), rename
+  (double-click), reorder rows by dragging (edges follow), tint with an accent
+  color.
+- **Orthogonal edges** — 90° polylines with obstacle-avoiding auto-routing that
+  recomputes on drop, never mid-drag. Drag segment grips to bend manually
+  (double-click a grip to collapse a run), drag the label to slide it, give an
+  edge its own color. Repeated clicks at one spot cycle through overlapping edges.
+- **Groups** — labelled rectangles under the nodes with a geometric membership:
+  a node belongs while its centre is inside, so dragging a group carries its
+  members (and any nested groups) along. Resize from four corner grips, tint,
+  or go outline-only (`fill: false` — transparent interior, clicks pass through).
+- **Boundary ports** — anchors on a group's border that make the whole box one
+  interface (e.g. load balancing). Drag an edge onto a group border to create
+  one (a ghost dot previews the spot, direction is inferred), or add them
+  programmatically. Ports slide along the border; attached edges follow.
+- **Undo / redo** — snapshot history (last 50 steps) covering UI gestures *and*
+  API calls alike. A whole drag is one step; no-ops record nothing.
+- **Copy / paste** — selected nodes + groups to the internal clipboard; a copied
+  group auto-includes its members, edges between copied nodes come along, and
+  pastes land centred in the view with fresh ids.
+- **JSON persistence** — pretty-printed export, validated import (bad files
+  throw before touching state).
+- **Vector PDF export** — a minimal built-in PDF 1.4 writer: one page, ≥20 px
+  clear space, theme-matched colors, selection-aware.
+- **Pan / zoom** — wheel zoom anchored at the cursor, middle-drag pan, fit-view,
+  reset-view. Everything snaps to a 20 px grid.
+- **Theming** — every color is a CSS custom property on `.ng-graph`; a `dark`
+  class (or `graph.setDark(true)`) swaps the whole palette.
+  
+## Gestures
 
-| Section | Line | What's there |
-|---|---|---|
-| STYLE | ~28 | embedded stylesheet (`NG_CSS`) + one-time `<head>` injection |
-| MODEL | ~325 | plain-object graph, CRUD, copy/paste, JSON serialisation — no DOM |
-| GEOMETRY | ~749 | layout constants, colour helpers, orthogonal edge routing, group nesting + boundary ports |
-| RENDERER | ~1305 | `Renderer` class: SVG drawing + PDF scene snapshot |
-| INTERACTIONS | ~1673 | every pointer/keyboard gesture, incl. the undo/redo history |
-| PDF EXPORT | ~2910 | minimal zero-dependency PDF 1.4 vector writer |
-| PUBLIC API | ~3207 | `createGraph()` — the factory that wires it all together |
+| Gesture | Result |
+|---|---|
+| click node / edge / group | select (shift-click toggles; multi-selection drags together) |
+| click overlapping edges | repeat clicks at the same spot cycle through them |
+| drag node | move, grid-snapped; glued waypoints follow, auto edges re-route on drop |
+| drag group body / corner grips | move (carries nested groups + members) / resize |
+| drag empty canvas | marquee-select (a group joins only when fully enclosed) |
+| drag middle button / wheel | pan / zoom at cursor |
+| drag port → port | connect (either direction: out→in or in→out) |
+| drag port → group border | create a boundary port there and wire it |
+| drag group port | slide it along the border |
+| drag a selected node's right edge | resize its width |
+| drag a param row | reorder rows (edges follow) |
+| drag an edge segment grip / its label | bend the edge / slide the label |
+| double-click a segment grip | collapse the run |
+| double-click node / param / edge / group label | inline text editor (Enter commits, Esc cancels) |
+| right-click, or double-click empty canvas | context menu (never changes the selection — left-click to target first) |
+| `Ctrl/Cmd + C` / `V` | copy / paste |
+| `Ctrl/Cmd + Z` / `Shift+Z` / `Y` | undo / redo |
+| Delete / Backspace | remove the selection |
+| Escape | cancel edit → close menu → clear selection |
 
----
+Errors (e.g. connecting two outputs) show as a transient toast, never a dialog.
 
-## The graph model (→ MODEL)
+## API — `createGraph(container)`
 
-Plain JSON-serialisable objects, no class instances:
+Creates the model, SVG renderer, and all interactions inside `container` (the
+`ng-graph` class is added for theming). Every call re-renders and records one
+undo step.
+
+### Nodes
+
+| Call | Description |
+|---|---|
+| `addNode({ x, y, label, params: [{ name }], width })` | add a node; returns it (with generated ids) |
+| `removeNode(id)` | remove a node and every edge touching it |
+| `setNodeLabel(id, label)` | rename |
+| `moveNode(id, x, y)` | move; glued waypoint runs follow |
+| `setNodeWidth(id, width)` | resize width (min 100); ports follow |
+| `setNodeColor(id, color)` | `#rgb`/`#rrggbb` accent, `null` = theme default; invalid values ignored |
+
+### Groups
+
+| Call | Description |
+|---|---|
+| `addGroup({ x, y, w, h, label, color })` | add a group box (defaults 320×220) |
+| `removeGroup(id)` | remove the box only — contained nodes stay |
+| `setGroupLabel(id, label)` / `setGroupColor(id, color)` | rename / tint |
+| `setGroupFill(id, on)` | `false` = outline-only group (transparent interior, border-only hit area) |
+| `setGroupRect(id, { x, y, w, h })` | reposition / resize |
+| `moveGroup(id, x, y)` | move + carry every member node and nested group |
+| `groupMembers(id)` | ids of the nodes currently inside (centre-based) |
+| `addGroupPort(groupId, { side, t })` | add a boundary port (`side`: `top`/`right`/`bottom`/`left`, `t`: 0..1); reuses a port already at that spot |
+| `removeGroupPort(groupId, portId)` | remove the port and every edge wired to it |
+| `getGroupPorts(groupId)` | the group's ports (live array) |
+
+### Parameters
+
+| Call | Description |
+|---|---|
+| `addParam(nodeId, { name })` | append a row (both ports appear); returns it |
+| `removeParam(nodeId, paramId)` | remove the row and any edge on its ports |
+| `moveParam(nodeId, paramId, toIndex)` | reorder rows (index clamped); edges follow |
+
+### Edges
+
+| Call | Description |
+|---|---|
+| `connect(source, target)` | refs `{ node, param }` or `{ group, port }`. Throws on unknown port, self-connect, or duplicate; returns the edge |
+| `removeEdge(id)` | delete |
+| `setEdgeLabel(id, label)` | set the single label (empty string clears it) |
+| `setEdgeLabelT(id, t)` | slide the label to fraction `t` (0..1) of edge length |
+| `setEdgeColor(id, color)` | `#rgb`/`#rrggbb` stroke color, `null` = theme default |
+
+### History, JSON, PDF
+
+| Call | Description |
+|---|---|
+| `undo()` / `redo()` | step through the last 50 changes; `false` when nothing to do |
+| `exportJSON()` | pretty-printed `{ version: 1, nodes, edges, groups }` string |
+| `importJSON(text)` | parse + validate, then replace the live model. Throws on bad JSON, wrong shape, or dangling port refs — before touching state |
+| `exportPDF(nodeIds?)` | one-page vector PDF as a `Uint8Array`. Defaults to all nodes; pass an array/Set for a subset (plus the groups containing them) |
+
+### Theme & viewport
+
+| Call | Description |
+|---|---|
+| `setDark(on)` | toggle the `dark` class |
+| `view` | live `{ x, y, scale }` of the pan/zoom transform |
+| `panBy(dx, dy)` | pan by screen pixels |
+| `zoomTo(scale)` | zoom centred on the canvas (clamped 0.2–4) |
+| `fitView()` | zoom + pan so everything (nodes, groups, routed edge paths) fits, centred |
+| `resetView()` | back to the origin at 100% |
+
+### Misc
+
+| Call | Description |
+|---|---|
+| `getNodes()` / `getEdges()` / `getGroups()` | live model arrays (read-only by convention) |
+| `addContextMenuItem(label, action)` | append an item to the context menu |
+| `destroy()` | remove listeners, SVG, and the `ng-graph` classes |
+
+## The graph model
+
+Plain JSON-serialisable objects — the MODEL section of `nodegraph.js` exports
+pure functions over this shape, usable without any UI:
 
 ```js
 {
@@ -49,167 +176,11 @@ Plain JSON-serialisable objects, no class instances:
 }
 ```
 
-- Every **param** has two ports: input on the node's left edge, output on the
-  right. Ports always land on grid intersections (`GRID = 20`).
-- **Edges** are orthogonal (90°) polylines: source port → `points` (manual
-  waypoints) → target port. An empty `points` array means the router picks a
-  default obstacle-avoiding route. The renderer re-bridges any waypoint list
-  into a 90° polyline, so a diagonal can never appear.
-- `label` is the edge's single label; `labelT` (0..1) is where it sits along it.
-  An edge's own `color` overrides the theme stroke.
-- **Groups** have no stored membership: a node belongs to a group while its
-  *centre* lies inside the rectangle. Moving a group carries its members;
-  resizing reveals or hides nodes without deleting them. Groups nest: dragging
-  a group also carries every group fully inside it (and their nodes), while
-  clicking a group that sits inside another targets the innermost one.
-  `fill: false` makes a group outline-only — the interior stays transparent and
-  clicks pass through it (only the border and label are interactive).
+An empty `points` array means the router picks the route; the renderer
+re-bridges any waypoint list into a 90° polyline, so a diagonal can never
+appear.
 
-The MODEL section exports pure functions over this shape (`addNode(model, …)`
-etc.) — useful for manipulating a model without a UI. The `graph` object
-returned by `createGraph()` wraps the same functions with automatic
-re-rendering (below).
-
----
-
-## `createGraph(container)` (→ PUBLIC API)
-
-Creates the model, the SVG renderer, and all interactions inside `container`
-(the `ng-graph` class is added for theming). Returns an API object; every call
-re-renders.
-
-### Nodes
-
-| Call | Description |
-|---|---|
-| `addNode({ x, y, label, params: [{ name }], width })` | add a node, returns it (with generated ids) |
-| `removeNode(id)` | remove a node and every edge touching it |
-| `setNodeLabel(id, label)` | rename |
-| `moveNode(id, x, y)` | move; waypoint runs glued to its ports follow |
-| `setNodeWidth(id, width)` | resize width (min 100); ports follow |
-| `setNodeColor(id, color)` | `#rgb`/`#rrggbb` accent (header + border), `null` = theme default; invalid values ignored |
-
-### Groups
-
-| Call | Description |
-|---|---|
-| `addGroup({ x, y, w, h, label, color })` | add a group box (defaults 320×220) |
-| `removeGroup(id)` | remove the box only — contained nodes stay |
-| `setGroupLabel(id, label)` / `setGroupColor(id, color)` | rename / tint (colour washes the fill and paints the double border) |
-| `setGroupFill(id, on)` | fill on/off; `false` = outline-only group (transparent interior, border-and-label hit area only). Menu: **Group → No fill** |
-| `setGroupRect(id, { x, y, w, h })` | reposition/resize (w, h floored at 1; interactive corner grips floor at `GROUP_MIN`) |
-| `moveGroup(id, x, y)` | move the box and translate every member node (and every nested group + its members) by the same delta |
-| `groupMembers(id)` | ids of the nodes currently inside (centre-based) |
-| `addGroupPort(groupId, { side, t })` | add a boundary port (`side`: `top`/`right`/`bottom`/`left`, `t`: 0..1 along it); returns it. Edges attach to a group through these anchors — one interface for the whole box (e.g. load balancing). A port is a drop target: edges from node output *or* input ports can wire to it; the port itself never starts an edge. A port at a spot another port already occupies is reused, never stacked |
-| `removeGroupPort(groupId, portId)` | remove the port and every edge wired to it |
-| `getGroupPorts(groupId)` | the group's ports (live array) |
-
-### Parameters
-
-| Call | Description |
-|---|---|
-| `addParam(nodeId, { name })` | append a param row (both ports appear); returns it |
-| `removeParam(nodeId, paramId)` | remove the row and any edge on its ports |
-| `moveParam(nodeId, paramId, toIndex)` | reorder rows (index clamped); edges follow the param, ports track the row |
-
-### Edges
-
-| Call | Description |
-|---|---|
-| `connect(source, target)` | refs `{ node, param }` or `{ group, port }` (a group boundary port). Throws on unknown port, self-connect, or duplicate; returns the edge |
-| `removeEdge(id)` | delete |
-| `setEdgeLabel(id, label)` | set the single label (empty string clears it) |
-| `setEdgeLabelT(id, t)` | slide the label to fraction `t` (0..1) of edge length |
-| `setEdgeColor(id, color)` | `#rgb`/`#rrggbb` stroke colour, `null` = theme default; invalid values ignored |
-
-### Undo / redo
-
-| Call | Description |
-|---|---|
-| `undo()` / `redo()` | step back/forward through the last 50 changes — UI gestures *and* API calls alike; returns `false` when there is nothing to do |
-| `Ctrl`/`Cmd` + `Z` | undo |
-| `Ctrl`/`Cmd` + `Shift` + `Z`, or `Ctrl`/`Cmd` + `Y` | redo |
-
-History is a snapshot stack (full JSON clone of the graph per step, capped at
-50). A whole drag counts as one step, and no-ops — a click that never moved,
-setting the same label, a `connect()` that throws — record nothing.
-
-### JSON
-
-| Call | Description |
-|---|---|
-| `exportJSON()` | pretty-printed `{ version: 1, nodes, edges, groups }` string |
-| `importJSON(text)` | parse + validate, then replace the live model. Throws on bad JSON, wrong shape, or dangling port refs — before touching state. `groups` are optional (older files) |
-
-### PDF
-
-| Call | Description |
-|---|---|
-| `exportPDF(nodeIds?)` | one-page vector PDF as a `Uint8Array`, ≥20 px clear space. Defaults to all nodes; pass an array/Set to export a subset (plus the groups containing them). Throws on an empty set. The context-menu **Export … as PDF** action is selection-aware: it exports the current selection, or everything when nothing is selected |
-
-### Theme & viewport
-
-| Call | Description |
-|---|---|
-| `setDark(on)` | toggle the `dark` class (see THEMING) |
-| `view` | live `{ x, y, scale }` of the pan/zoom transform |
-| `panBy(dx, dy)` | pan by screen pixels |
-| `zoomTo(scale)` | zoom centred on the canvas (clamped 0.2–4) |
-| `fitView()` | zoom and pan so everything fits on screen with a margin, centred — nodes, groups, and the routed paths of every edge (clamped 0.2–4) |
-| `resetView()` | reset the viewport to the origin at 100% (`{ x: 0, y: 0, scale: 1 }`) |
-
-### Misc
-
-| Call | Description |
-|---|---|
-| `getNodes()` / `getEdges()` / `getGroups()` | live model arrays (read-only by convention) |
-| `addContextMenuItem(label, action)` | append an item to the context menu |
-| `destroy()` | remove listeners, SVG, and the `ng-graph` classes |
-
-### Copy & paste
-
-| Gesture / Call | Description |
-|---|---|
-| `Ctrl`/`Cmd` + `C` | copy the selected nodes + groups to the internal clipboard (a copied group auto-includes its member nodes; edges between copied nodes come along) |
-| `Ctrl`/`Cmd` + `V` | paste with fresh ids, centred in the viewport (the whole copied bounds land mid-screen, so you always have room to drag it where you want) |
-| menu **Copy** / **Paste** | same, from the context menu (Paste appears once something is copied) |
-
----
-
-## Interactions (→ INTERACTIONS)
-
-| Gesture | Result |
-|---|---|
-| click node / edge / group | select (shift-click toggles; a multi-selection drags together) |
-| click overlapping edges | repeat clicks at the same spot cycle the selection through them |
-| click empty canvas | clear selection |
-| drag node | move, snapping to the grid; connected waypoints follow (auto edges re-route on drop) |
-| drag group body | move the group, every group nested in it, and their nodes; membership is frozen at drag start. Clicking a group inside another targets the innermost one |
-| drag a selected group's corner grip | resize from any of the four corners (opposite corner fixed, snaps to grid, floors at `GROUP_MIN`) |
-| drag empty canvas | marquee-select nodes and groups (a group is selected only when the rectangle fully contains it) |
-| drag middle button | pan (wheel zooms, anchored at the cursor) |
-| drag port → port | connect (either direction: out→in or in→out) |
-| drag port → group border | connect to the group: a ghost dot + border highlight preview the spot, dropping there creates a boundary port and wires it (works from an output *or* input port — the edge is oriented automatically) |
-| drag group port | slide it along the group's border (grid-snapped, clamped to the side); attached edges follow. It never starts an edge — group ports only accept connections |
-| right-click a group port | **Delete port** (removes the port and its edges) |
-| drag a selected node's right-edge grip | resize its width |
-| drag a param row | reorder the node's params (an insertion line shows where the row lands) |
-| drag an edge segment grip | slide that straight run perpendicular to itself |
-| double-click a segment grip | collapse the run |
-| drag an edge label | slide it along the edge |
-| double-click node / param / edge label / group label | inline text editor (Enter commits, Escape cancels, clicking away commits) |
-| `+` / `−` / `×` buttons | add param / remove param / delete node |
-| right-click, or double-click empty canvas | context menu: undo/redo, add node/group, delete selection, copy/paste, rename node/group, tint node/group/edge, group **No fill**, Export selection/all as PDF, Export / Import JSON, Fit view, Reset view, theme toggle. Right-clicking never changes the selection — the menu acts on what is already selected (left-click first to target a node/edge/group) |
-| `Ctrl`/`Cmd` + `C` / `V` | copy / paste the selection (see Copy & paste) |
-| `Ctrl`/`Cmd` + `Z` / `Shift`+`Z` / `Y` | undo / redo (see Undo / redo) |
-| Delete / Backspace | remove the selection |
-| Escape | cancel edit → close menu → clear selection |
-
-Errors (e.g. connecting two outputs) show as a transient toast, never a dialog.
-
----
-
-## THEMING (→ STYLE)
+## Theming
 
 All visuals come from CSS custom properties on `.ng-graph`; the `dark` class
 (or `graph.setDark(true)`) swaps the whole palette. Override any of them in
@@ -232,29 +203,7 @@ your own stylesheet:
 | `--ng-group-port` | `#777` | `#8a8aa0` | group boundary ports + the connect ghost dot |
 
 A node's or group's own `color` overrides the header/border (nodes) or
-fill/border (groups) via inline custom properties — see `#renderNode` /
-`#renderGroup` in RENDERER.
-
----
-
-## PDF export (→ PDF EXPORT)
-
-`buildPDF(scene)` is a minimal PDF 1.4 writer: no libraries, vector output,
-standard Helvetica fonts (no embedding). `Renderer.buildScene(model, nodeIds)`
-(RENDERER) snapshots the graph into the scene format it consumes, reading the
-current theme's CSS variables so the PDF matches the screen:
-
-- **Dashed edges** — the `d` operator takes a PDF *array* plus a phase
-  (`[6 4] 0 d`); the bare `6 4 d` form is invalid and viewers silently draw
-  solid lines.
-- **Label halos** — SVG's `paint-order: stroke` is emulated with two passes:
-  stroke-only text (`1 Tr`) then fill (`0 Tr`). PDF render mode 2 strokes *over*
-  the fill and eats thin glyphs — never use it here.
-- **No alpha** — translucent group fills are composited onto the page background
-  into an opaque colour before writing.
-- Groups are included when they contain at least one exported node.
-
----
+fill/border (groups).
 
 ## Advanced exports
 
@@ -263,24 +212,35 @@ section it lives in) so you can build custom tooling without a UI:
 
 - **Model**: `createModel`, `findNode`, `findGroup`, and every CRUD function —
   including `moveParam`, `setEdgeColor`, `moveGroupsBy`, `copySelection` and
-  `pasteSnapshot` (a `{ nodes, edges, groups }` snapshot with fresh ids on paste).
+  `pasteSnapshot`.
 - **Geometry**: `GRID`, `NODE_W`, `MIN_NODE_W`, `HEADER_H`, `ROW_H`, `GROUP_MIN`,
   `GROUP_LABEL_H`, `GROUP_CORNERS`, `EDGE_DASH`, `NODE_COLORS`, `portPos`,
   `nodeRects`, `nodesInGroup`, `groupsInGroup`, `groupClosure`, `edgePoints`,
   `edgesNearPoint`, `moveSegment`, `removeSegment`, `segmentMovable`,
   `adjustPointsForMove`, `snapToGrid`, `polylinePath`, `polylineLength`,
-  `polylinePointAt`, `nearestSegment`, `findFreeSpot`, and the colour helpers
+  `polylinePointAt`, `nearestSegment`, `findFreeSpot`, and the color helpers
   (`normalizeColor`, `hexToRgba`, `readableTextOn`).
 - **Renderer**: `Renderer` (headless use: `new Renderer(container)` then
   `buildScene`).
 - **PDF**: `buildPDF`, `textWidth`.
 - **Style**: `NG_CSS` (the stylesheet source, if you'd rather inject it yourself).
 
+## Files
+
+| File | Purpose |
+|---|---|
+| `nodegraph.js` | the library — seven documented sections: STYLE, MODEL, GEOMETRY, RENDERER, INTERACTIONS, PDF EXPORT, PUBLIC API |
+| `nodegraph.min.js` | compact build of the same code (comments stripped, CSS inlined) |
+| `index.html` | the demo |
+| `server.js` | minimal static server: `node server.js [port]` |
+
 ## Tests
 
 The suite lives outside the package (this is a zero-dependency library). It
-runs under Node + jsdom from `/tmp/ngtest`: `node geom.mjs`, `inter.mjs`,
-`regress.mjs`, `seg2.mjs`, `pdf.mjs`, `test-label.mjs`, `color.mjs`,
-`route.mjs`, `groups.mjs`, `copy.mjs`, `paramorder.mjs`, `edecycle.mjs`,
-`edgecolor.mjs`, `dragroute.mjs`, plus `pdfval.mjs`, which round-trips the PDF
-through pdf-lib to prove the bytes are a valid, readable document.
+runs under Node + jsdom from `/tmp/ngtest`: `node smoke.mjs`, `geom.mjs`,
+`inter.mjs`, `groups.mjs`, `gports.mjs`, `route.mjs`, `seg2.mjs`, `dragroute.mjs`,
+`paramorder.mjs`, `copy.mjs`, `undo.mjs`, `edecycle.mjs`, `edgecolor.mjs`,
+`color.mjs`, `test-label.mjs`, `layer.mjs`, `regress.mjs`, `fixes7.mjs`, plus
+`pdfval.mjs`, which round-trips the PDF through pdf-lib to prove the bytes are
+a valid, readable document. `min-*.mjs` mirror the same suites against
+`nodegraph.min.js`.

@@ -17,33 +17,97 @@
 
     const graph = createGraph(document.getElementById('app'));
 
-    // starter graph
-    const a = graph.addNode({ x: 80, y: 120, label: 'Source', params: [{ name: 'value' }] });
-    const b = graph.addNode({ x: 380, y: 120, label: 'Process', params: [{ name: 'input' }, { name: 'result' }] });
-    const c = graph.addNode({ x: 680, y: 120, label: 'Sink', params: [{ name: 'input' }] });
-    const e1 = graph.connect({ node: a.id, param: a.params[0].id }, { node: b.id, param: b.params[0].id });
-    graph.connect({ node: b.id, param: b.params[1].id }, { node: c.id, param: c.params[0].id });
-    graph.setEdgeLabel(e1.id, 'data');
+    // Layout: a left-to-right pipeline on the 20px grid. Every node centre
+    // sits inside its group with even margins, and rows are aligned so the
+    // auto-routed edges run straight across.
 
-    // A group is a labelled rectangle drawn underneath the nodes, with a solid
-    // double border and a light tinted fill (click it, then right-click → Group
-    // colour to tint it). Membership is geometric (a node belongs while its centre is
-    // inside the box), so dragging the group carries Source + Process along
-    // together — and any group nested inside it too. Right-click the canvas for
-    // "Add group here"; drag a group's body to move it, any of its four corner
-    // grips to resize, or double-click its label to rename. Clicking a group
-    // that sits inside another selects the inner one. Everything snaps to the
-    // grid.
-    graph.addGroup({ x: 60, y: 100, w: 540, h: 140, label: 'Pipeline', color: '#8250df' });
+    // ── nodes ────────────────────────────────────────────────────────────────
+    // Params are rows; every row has an input port (left) and an output port
+    // (right). `width` resizes the node (ports follow), `color` tints the
+    // header + border — both also live-editable: drag the right-edge grip to
+    // resize, double-click a header or row to rename, drag a row to reorder it.
+    // A node is HEADER_H(30) + 20px per row tall; positions below are chosen so
+    // the main flow's ports all land on y=200 and run straight across.
+    const load = graph.addNode({ x: 80, y: 160, label: 'Load CSV', params: [{ name: 'data' }] });
+    graph.setNodeColor(load.id, '#0f9d8f');
 
-    // More things to try:
-    //  • drag a param row up/down to reorder it (edges follow the row)
-    //  • select nodes/groups and Ctrl/Cmd+C, then Ctrl/Cmd+V to paste a copy
-    //    (a copied group brings its nodes along; pastes land centred in the view)
+    const parse = graph.addNode({
+      x: 360, y: 100, label: 'Parse',
+      params: [{ name: 'raw' }, { name: 'rows' }, { name: 'errors' }],
+    });
+
+    const validate = graph.addNode({ x: 360, y: 240, label: 'Validate', params: [{ name: 'rows' }, { name: 'ok' }] });
+
+    const merge = graph.addNode({
+      x: 840, y: 160, label: 'Merge', width: 220,
+      params: [{ name: 'good' }, { name: 'fixed' }, { name: 'table' }],
+    });
+
+    const store = graph.addNode({ x: 1160, y: 200, label: 'Store', params: [{ name: 'table' }] });
+    graph.setNodeColor(store.id, '#2a7fff');
+
+    // ── groups ───────────────────────────────────────────────────────────────
+    // A group is a labelled rectangle under the nodes. Membership is purely
+    // geometric (a node belongs while its centre is inside), so dragging the
+    // box carries Parse + Validate along — and any group nested inside it.
+    // Corner grips resize it; double-click the label to rename; right-click
+    // for colour / "No fill". Clicking a group inside another targets the
+    // innermost one.
+    const pipeline = graph.addGroup({ x: 340, y: 60, w: 240, h: 280, label: 'Pipeline', color: '#8250df' });
+
+    // nested group (fully inside Pipeline) — dragging Pipeline carries this
+    // one, and Validate, along with it
+    graph.addGroup({ x: 350, y: 210, w: 220, h: 110, label: 'Quality checks' });
+
+    // outline-only group: transparent interior, clicks pass through it —
+    // only the border and label are interactive
+    const storage = graph.addGroup({ x: 1140, y: 150, w: 220, h: 120, label: 'Storage', color: '#0f9d8f' });
+    graph.setGroupFill(storage.id, false);
+
+    // ── edges ────────────────────────────────────────────────────────────────
+    // Edges are orthogonal polylines with obstacle-avoiding auto-routing:
+    // re-routes when you drop a node, never mid-drag. Drag a segment grip to
+    // bend an edge manually (double-click a grip to collapse the run), drag
+    // the label to slide it, or right-click an edge for its colour menu.
+
+    // boundary ports make a group one interface (e.g. load balancing): edges
+    // wire INTO and OUT OF the whole box through anchors on its border. Here
+    // the Load output enters the Pipeline and the Pipeline output reaches
+    // Merge, both on the y=200 centre line. You can also create one by
+    // dragging an edge onto a group's border — a ghost dot previews the spot,
+    // direction is inferred. Drag a port to slide it along the border
+    // (attached edges follow); right-click one to delete it.
+    const pin = graph.addGroupPort(pipeline.id, { side: 'left', t: 0.5 });
+    const pout = graph.addGroupPort(pipeline.id, { side: 'right', t: 0.5 });
+    graph.connect({ node: load.id, param: load.params[0].id }, { group: pipeline.id, port: pin.id });
+    graph.connect({ group: pipeline.id, port: pout.id }, { node: merge.id, param: merge.params[0].id });
+
+    // Parse → Validate, inside the group
+    graph.connect({ node: parse.id, param: parse.params[1].id }, { node: validate.id, param: validate.params[0].id });
+
+    // an edge's own colour overrides the theme stroke; labelT slides the
+    // label along the polyline (0 = source port, 1 = target port)
+    const retry = graph.connect({ node: parse.id, param: parse.params[2].id }, { node: merge.id, param: merge.params[1].id });
+    graph.setEdgeLabel(retry.id, 'retry');
+    graph.setEdgeColor(retry.id, '#d33a3a');
+    graph.setEdgeLabelT(retry.id, 0.3);
+
+    graph.connect({ node: merge.id, param: merge.params[2].id }, { node: store.id, param: store.params[0].id });
+
+    // ── the rest, via the context menu (right-click, or double-click empty
+    //    canvas — right-clicking never changes the selection, so left-click
+    //    a node/edge/group first to target it) ───────────────────────────────
+    //  • undo / redo (Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z) — a whole drag is one step
+    //  • copy / paste (Ctrl/Cmd+C, Ctrl/Cmd+V) — a copied group brings its
+    //    members along; pastes land centred in the view
+    //  • Delete removes the selection; marquee-drag empty canvas to select
+    //    several (groups need to be fully enclosed); shift-click adds more
     //  • where two edges overlap, click the same spot repeatedly to cycle
-    //    between them; select an edge, then right-click it for "Edge colour"
-    //  • auto-routed edges recompute their obstacle-avoiding path when you
-    //    drop a node, not while you drag it
+    //  • Export selection (or all) as vector PDF, Export / Import JSON
+    //  • Fit view / Reset view, wheel-zoom at cursor, middle-drag to pan
+    //  • Dark / Light theme — every colour is a CSS custom property
+
+    graph.fitView();
   </script>
 </body>
 </html>
