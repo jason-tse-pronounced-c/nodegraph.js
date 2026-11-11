@@ -585,6 +585,18 @@ export function setGroupColor(model, id, color) {
   if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/.test(c)) group.color = c;
 }
 
+// Turn a group's fill on or off. With fill off the group is a pure outline:
+// the interior is fully transparent, and the body rect only captures clicks
+// on its border (see #renderGroup), so marquee drags and empty-canvas
+// gestures pass through the group's area. Pass false to remove the fill,
+// anything else to restore it.
+export function setGroupFill(model, id, on) {
+  const group = findGroup(model, id);
+  if (!group) return;
+  if (on === false) group.fill = false;
+  else delete group.fill;
+}
+
 // Set a group's rectangle (graph coords). Width/height are floored at 1.
 // Boundary ports keep their relative spot (t), so their absolute position
 // moves with the border — the waypoint runs glued to them follow, exactly as
@@ -611,12 +623,29 @@ export function setGroupRect(model, id, { x, y, w, h } = {}) {
 // representing e.g. one output fanning out into a whole group of like nodes.
 // Position is relative (side + t along it), so ports survive a resize.
 
+// A group's existing port sitting within tolPx (absolute graph distance) of a
+// side/t spot, or null. Comparing absolute positions — not just side + t —
+// also catches two ports meeting at the same CORNER from adjacent sides. This
+// is what keeps a drop that misses the hit circle but lands on the border from
+// stacking a second dot on top of an existing one.
+function groupPortNear(group, side, t, tolPx = GRID / 2) {
+  if (!group || !group.ports) return null;
+  const p = groupPortPos(group, { side, t });
+  return group.ports.find((q) => {
+    const qp = groupPortPos(group, q);
+    return Math.hypot(qp.x - p.x, qp.y - p.y) <= tolPx;
+  }) || null;
+}
+
 export function addGroupPort(model, groupId, { side = 'right', t = 0.5 } = {}) {
   const group = findGroup(model, groupId);
   if (!group) return null;
   const s = GROUP_SIDES.includes(side) ? side : 'right';
   const tt = Math.min(1, Math.max(0, Number(t) || 0));
   if (!group.ports) group.ports = [];
+  // never stack two ports on the same spot — reuse the one already there
+  const near = groupPortNear(group, s, tt);
+  if (near) return near;
   const port = { id: uid('gp'), side: s, t: tt };
   group.ports.push(port);
   return port;
@@ -753,6 +782,8 @@ export function importJSON(text) {
       ...(typeof g.color === 'string' && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(g.color.trim())
         ? { color: g.color.trim().toLowerCase() }
         : {}),
+      // fill is opt-out: only an explicit false persists (absent = filled)
+      ...(g.fill === false ? { fill: false } : {}),
       // boundary ports are optional too; bad entries are dropped
       ...(Array.isArray(g.ports) && g.ports.length
         ? {
@@ -1616,17 +1647,36 @@ export class Renderer {
 
     const scene = { margin: 20, background: colors.bg, rects: [], circles: [], paths: [], texts: [] };
     const nodes = model.nodes.filter((nd) => ids.has(nd.id));
-    const edges = model.edges.filter((e) => ids.has(e.source.node) && ids.has(e.target.node));
+    // Groups that actually get drawn. A group is on the page when it contains
+    // ≥1 exported node (centre-based membership) OR one of its boundary ports
+    // is wired to an exported node — otherwise that connector would dangle to
+    // a box that isn't there. A group-port edge is in scope when BOTH its
+    // endpoints are: an endpoint ref is {node,param} or {group,port}, so the
+    // old `ids.has(source.node) && ids.has(target.node)` test silently dropped
+    // EVERY edge wired to a group port (a group ref has no .node).
+    const drawnGroupIds = new Set();
+    for (const g of model.groups || []) {
+      if (nodesInGroup(model, g).some((nid) => ids.has(nid))) drawnGroupIds.add(g.id);
+    }
+    for (const e of model.edges) {
+      if (e.source.group && e.target.node && ids.has(e.target.node)) drawnGroupIds.add(e.source.group);
+      if (e.target.group && e.source.node && ids.has(e.source.node)) drawnGroupIds.add(e.target.group);
+    }
+    const drawnGroups = (model.groups || []).filter((g) => drawnGroupIds.has(g.id));
+    const endInScope = (ref) => (ref.node ? ids.has(ref.node) : drawnGroupIds.has(ref.group));
+    const edges = model.edges.filter((e) => endInScope(e.source) && endInScope(e.target));
 
     // groups first — they render underneath the nodes. A group is included when
     // it contains at least one exported node (centre-based membership), so a
     // subset export still frames its members without stray empty boxes.
-    for (const group of model.groups || []) {
-      if (!nodesInGroup(model, group).some((nid) => ids.has(nid))) continue;
+    for (const group of drawnGroups) {
       const accent = normalizeColor(group.color);
-      const fill = accent ? mixOn(colors.bg, accent, 0.1) : mixOn(colors.bg, colors.groupFill);
+      const noFill = group.fill === false;
+      const fill = noFill ? null : accent ? mixOn(colors.bg, accent, 0.1) : mixOn(colors.bg, colors.groupFill);
       const border = accent || colors.groupBorder;
-      // outer border + inset inner line = the solid double border (see CSS)
+      // outer border + inset inner line = the solid double border (see CSS).
+      // A no-fill group exports as stroke-only (the PDF writer emits `S` for
+      // an unfilled rect), matching the transparent interior on screen.
       scene.rects.push({ x: group.x, y: group.y, w: group.w, h: group.h, r: 8, fill, stroke: border, strokeWidth: 1.5 });
       scene.rects.push({ x: group.x + 3, y: group.y + 3, w: Math.max(0, group.w - 6), h: Math.max(0, group.h - 6), r: 5, stroke: border, strokeWidth: 1 });
       scene.texts.push({ x: group.x + 10, y: group.y + GROUP_LABEL_H - 7, text: group.label || 'Group', size: 12, bold: true, fill: colors.muted });
@@ -1759,17 +1809,24 @@ export class Renderer {
   #renderGroup(group, selected) {
     // A group's own colour tints its fill (a light wash) and paints the double
     // border; otherwise the theme's --ng-group-* defaults apply (see CSS).
+    // With fill off the interior is transparent and the body rect only catches
+    // clicks on its border, so the label (normally pointer-events:none, riding
+    // on the body rect) must take its own hits to stay double-clickable.
     const accent = normalizeColor(group.color);
-    const style = accent
+    const noFill = group.fill === false;
+    let style = accent
       ? `--ng-group-fill:${hexToRgba(accent, 0.10)};--ng-group-border:${accent}`
-      : undefined;
-    const g = el('g', { class: 'ng-group' + (selected ? ' ng-selected' : ''), style, 'data-group': group.id }, this.groupsLayer);
+      : '';
+    if (noFill) style += `${style ? ';' : ''}--ng-group-fill:transparent`;
+    const g = el('g', { class: 'ng-group' + (selected ? ' ng-selected' : ''), style: style || undefined, 'data-group': group.id }, this.groupsLayer);
     // The body rect carries the fill + outer border and is the drag handle
     // (data-group). It lives in the bottom layer, so nodes/edges drawn above
     // still win their own clicks and only the group's empty area selects it.
+    // A no-fill group narrows its hit area to the stroke (border) only.
     el('rect', {
       x: group.x, y: group.y, width: group.w, height: group.h, rx: 8,
       class: 'ng-group-rect', 'data-group': group.id,
+      style: noFill ? 'pointer-events:stroke' : undefined,
     }, g);
     // second, inset line — together with the outer border this reads as a
     // solid DOUBLE line, clearly distinct from the dashed edges
@@ -1781,6 +1838,7 @@ export class Renderer {
     const label = el('text', {
       x: group.x + 10, y: group.y + GROUP_LABEL_H - 7,
       class: 'ng-group-label', 'data-group': group.id,
+      style: noFill ? 'pointer-events:all' : undefined,
     }, g);
     label.textContent = group.label || 'Group';
     // boundary ports — interface anchors on the border. Drawn in their own
@@ -1977,10 +2035,8 @@ function setupInteractions(model, renderer, render, history) {
   let toastTimer = null;
   const extraMenuItems = []; // [{ label, action }]
   // Internal copy buffer (not the system clipboard — that would need async
-  // permissions and can't carry graph structure anyway). pasteCount cascades
-  // each successive paste down-right so repeated pastes never stack exactly.
+  // permissions and can't carry graph structure anyway).
   let clipboard = null; // { nodes, edges, groups } | null
-  let pasteCount = 0;
   // Cycle state for overlapping edges: the last click point + the edges that
   // were near it. A repeat click at the same spot advances the selection.
   let lastEdgeCycle = null; // { x, y, ids } | null
@@ -2022,6 +2078,59 @@ function setupInteractions(model, renderer, render, history) {
     x: gx * view.scale + view.x,
     y: gy * view.scale + view.y,
   });
+
+  // Reset the viewport to the origin at 100% (the old "Fit view" behaviour).
+  const resetView = () => {
+    view.x = 0;
+    view.y = 0;
+    view.scale = 1;
+    renderer.setView(view);
+  };
+
+  // Zoom so ALL content fits the canvas, centred, with a margin of clear space
+  // around it. The bounding box spans every node, group, and routed edge
+  // polyline (so a long auto-routed edge with no waypoints is framed too).
+  // Scale is clamped to the wheel-zoom range; an empty graph just resets.
+  const fitView = () => {
+    let x0 = Infinity;
+    let y0 = Infinity;
+    let x1 = -Infinity;
+    let y1 = -Infinity;
+    const grow = (x, y) => {
+      if (x < x0) x0 = x;
+      if (y < y0) y0 = y;
+      if (x > x1) x1 = x;
+      if (y > y1) y1 = y;
+    };
+    for (const n of model.nodes) {
+      grow(n.x, n.y);
+      grow(n.x + nodeWidth(n), n.y + nodeHeight(n));
+    }
+    for (const g of model.groups || []) {
+      grow(g.x, g.y);
+      grow(g.x + g.w, g.y + g.h);
+    }
+    const obstacles = nodeRects(model);
+    for (const edge of model.edges) {
+      const ends = edgeEnds(model, edge);
+      if (!ends) continue;
+      for (const p of edgePoints(ends.a, ends.b, edge.points, obstacles)) grow(p.x, p.y);
+    }
+    if (!Number.isFinite(x0)) return resetView(); // nothing to frame
+    const r = svg.getBoundingClientRect();
+    const pad = 40; // clear space, in screen px
+    const bw = Math.max(1, x1 - x0);
+    const bh = Math.max(1, y1 - y0);
+    const scale = Math.min(
+      MAX_SCALE,
+      Math.max(MIN_SCALE, Math.min((r.width - pad * 2) / bw, (r.height - pad * 2) / bh))
+    );
+    // centre the content's midpoint in the viewport at the chosen scale
+    view.scale = scale;
+    view.x = r.width / 2 - ((x0 + x1) / 2) * scale;
+    view.y = r.height / 2 - ((y0 + y1) / 2) * scale;
+    renderer.setView(view);
+  };
 
   // e.target.closest() scoped to the SVG (avoids matching menu elements).
   const closest = (e, attr) => {
@@ -2207,18 +2316,42 @@ function setupInteractions(model, renderer, render, history) {
   const copySelectionToClipboard = () => {
     if (!selNodes.size && !selGroups.size) return;
     clipboard = copySelection(model, selNodes, selGroups);
-    pasteCount = 0;
     const n = clipboard.nodes.length;
     const g = clipboard.groups.length;
     toast(`Copied ${n} node${n === 1 ? '' : 's'}${g ? ` + ${g} group${g === 1 ? '' : 's'}` : ''}`);
   };
 
-  // Insert the buffer offset down-right of the original, with fresh ids.
+  // Insert the buffer at the centre of the viewport, with fresh ids. Centering
+  // (instead of a small offset from the original) keeps the pasted copy fully
+  // on screen and gives the user control: pan/zoom first, then paste exactly
+  // where you're looking.
   const pasteClipboard = () => {
     if (!clipboard) return;
-    const off = GRID * (1 + pasteCount++);
+    // bounding box of the snapshot (nodes + groups) in graph coords
+    let x0 = Infinity;
+    let y0 = Infinity;
+    let x1 = -Infinity;
+    let y1 = -Infinity;
+    for (const n of clipboard.nodes) {
+      x0 = Math.min(x0, n.x);
+      y0 = Math.min(y0, n.y);
+      x1 = Math.max(x1, n.x + nodeWidth(n));
+      y1 = Math.max(y1, n.y + nodeHeight(n));
+    }
+    for (const g of clipboard.groups) {
+      x0 = Math.min(x0, g.x);
+      y0 = Math.min(y0, g.y);
+      x1 = Math.max(x1, g.x + g.w);
+      y1 = Math.max(y1, g.y + g.h);
+    }
+    if (!Number.isFinite(x0)) return; // empty snapshot — nothing to paste
+    // centre of the visible canvas, in graph coordinates
+    const r = svg.getBoundingClientRect();
+    const c = screenToGraph(r.left + r.width / 2, r.top + r.height / 2);
+    const dx = c.x - (x0 + x1) / 2;
+    const dy = c.y - (y0 + y1) / 2;
     const pre = history.begin();
-    const { nodeIds, groupIds } = pasteSnapshot(model, clipboard, off, off);
+    const { nodeIds, groupIds } = pasteSnapshot(model, clipboard, dx, dy);
     history.end(pre);
     select(nodeIds, null, groupIds);
     render();
@@ -2282,14 +2415,28 @@ function setupInteractions(model, renderer, render, history) {
     }
   };
 
-  // Export the whole graph as a one-page vector PDF with ≥20px of clear space
-  // around it. Always available: double-clicking empty canvas clears the
-  // selection before the menu opens, so a selection-only export would be
-  // unreachable from here.
+  // The node ids a PDF export should cover: the current selection (selected
+  // nodes, plus every node inside a selected group), or the whole graph when
+  // nothing is selected. buildScene then frames just those nodes and the groups
+  // that contain them.
+  const exportScope = () => {
+    if (!selNodes.size && !selGroups.size) return model.nodes.map((n) => n.id);
+    const ids = new Set(selNodes);
+    for (const gid of selGroups) {
+      const g = findGroup(model, gid);
+      if (g) for (const nid of nodesInGroup(model, g)) ids.add(nid);
+    }
+    return [...ids];
+  };
+
+  // Export as a one-page vector PDF with ≥20px of clear space around it.
+  // Exports the selection when one exists (left-click to select, then open the
+  // menu — right-clicking never changes the selection); otherwise the whole graph.
   const exportPdf = async () => {
-    if (!model.nodes.length) return toast('Nothing to export');
+    const ids = exportScope();
+    if (!ids.length) return toast('Nothing to export');
     try {
-      const bytes = buildPDF(renderer.buildScene(model, model.nodes.map((n) => n.id)));
+      const bytes = buildPDF(renderer.buildScene(model, ids));
       const name = 'graph.pdf';
       if (window.showSaveFilePicker) {
         const handle = await window.showSaveFilePicker({
@@ -2374,6 +2521,13 @@ function setupInteractions(model, renderer, render, history) {
       const group = (model.groups || []).find((g) => g.id === gid);
       if (group) items.push({ label: 'Rename group', action: () => editGroup(group) });
     }
+    // rename a selected node (mirrors Rename group; double-clicking the node's
+    // header does the same thing directly)
+    if (selNodes.size === 1) {
+      const nid = [...selNodes][0];
+      const node = model.nodes.find((n) => n.id === nid);
+      if (node) items.push({ label: 'Rename node', action: () => editNode(node) });
+    }
     // tint the selected edge(s) — same palette as nodes; the colour paints the
     // edge's stroke (the selected highlight still wins on screen)
     if (selEdge) {
@@ -2396,12 +2550,16 @@ function setupInteractions(model, renderer, render, history) {
       });
     }
     // tint the selected group(s) — same palette as nodes; the colour washes
-    // the group's fill and paints its double border
+    // the group's fill and paints its double border. "No fill" drops the wash
+    // entirely (outline-only); picking any colour brings the fill back.
     if (selGroups.size) {
       const gids = [...selGroups];
       const setGroupColorAll = (c) => {
         history.push();
-        for (const id of gids) setGroupColor(model, id, c);
+        for (const id of gids) {
+          setGroupFill(model, id, true);
+          setGroupColor(model, id, c);
+        }
         render();
       };
       items.push({
@@ -2413,6 +2571,14 @@ function setupInteractions(model, renderer, render, history) {
             action: () => setGroupColorAll(c.value),
           })),
           { label: 'Default', action: () => setGroupColorAll(null) },
+          {
+            label: 'No fill',
+            action: () => {
+              history.push();
+              for (const id of gids) setGroupFill(model, id, false);
+              render();
+            },
+          },
         ],
       });
     }
@@ -2440,19 +2606,21 @@ function setupInteractions(model, renderer, render, history) {
       {
         label: 'Export / Import',
         submenu: [
-          { label: 'Export as PDF…', action: exportPdf },
+          {
+            label: selNodes.size || selGroups.size ? 'Export selection as PDF…' : 'Export all as PDF…',
+            action: exportPdf,
+          },
           { label: 'Export JSON…', action: exportJson },
           { label: 'Import JSON…', action: importJson },
         ],
       },
       {
         label: 'Fit view',
-        action: () => {
-          view.x = 0;
-          view.y = 0;
-          view.scale = 1;
-          renderer.setView(view);
-        },
+        action: fitView,
+      },
+      {
+        label: 'Reset view',
+        action: resetView,
       },
       { label: container.classList.contains('dark') ? 'Light theme' : 'Dark theme', action: () => container.classList.toggle('dark') },
       ...extraMenuItems,
@@ -2741,9 +2909,10 @@ function setupInteractions(model, renderer, render, history) {
     closeEditor();
     closeMenu();
     const base = e.shiftKey ? new Set(selNodes) : new Set();
+    const baseGroups = e.shiftKey ? new Set(selGroups) : new Set();
     if (!e.shiftKey && (selNodes.size || selEdge || selGroups.size)) select(null, null);
     const p = screenToGraph(e.clientX, e.clientY);
-    drag = { kind: 'marquee', ox: p.x, oy: p.y, shift: e.shiftKey, base };
+    drag = { kind: 'marquee', ox: p.x, oy: p.y, shift: e.shiftKey, base, baseGroups };
   });
 
   // The drag scope for the current group selection: every selected group, every
@@ -2825,6 +2994,7 @@ function setupInteractions(model, renderer, render, history) {
       const dx = snapToGrid(p.x - drag.ox);
       const dy = snapToGrid(p.y - drag.oy);
       if (dx || dy) {
+        drag.moved = true;
         moveGroupsBy(model, drag.scope.groupIds, drag.scope.nodeIds, dx, dy);
         drag.ox += dx;
         drag.oy += dy;
@@ -2863,6 +3033,7 @@ function setupInteractions(model, renderer, render, history) {
       render();
     } else if (drag.kind === 'node') {
       const p = screenToGraph(e.clientX, e.clientY);
+      drag.moved = true; // any movement re-rendered with the cheap router → pointerup must re-route
       // nodes snap to the background grid: each node's own position lands on a
       // grid line (not just the cursor delta), so off-grid nodes snap in too
       const sx = p.x - drag.dx;
@@ -2902,6 +3073,7 @@ function setupInteractions(model, renderer, render, history) {
       // the new width snaps to the grid so the right edge stays on a grid line
       const w = snapToGrid(drag.base + (p.x - drag.ox));
       if (nodeWidth(node) !== w) {
+        drag.moved = true;
         setNodeWidth(model, node.id, w);
         render();
       }
@@ -2976,10 +3148,18 @@ function setupInteractions(model, renderer, render, history) {
       const h = Math.abs(p.y - drag.oy);
       const hit = new Set(drag.shift ? drag.base : []);
       for (const node of model.nodes) if (rectHits(x, y, w, h, node)) hit.add(node.id);
+      // Groups join the marquee only when the band FULLY contains them — a
+      // group is a large backdrop, and selecting one on a mere corner touch
+      // would drag half the canvas unexpectedly.
+      const hitGroups = new Set(drag.shift ? drag.baseGroups : []);
+      for (const g of model.groups || []) {
+        if (g.x >= x && g.x + g.w <= x + w && g.y >= y && g.y + g.h <= y + h) hitGroups.add(g.id);
+      }
       selNodes.clear();
       for (const id of hit) selNodes.add(id);
       selEdge = null;
       selGroups.clear();
+      for (const id of hitGroups) selGroups.add(id);
       render();
       renderer.drawMarquee(x, y, w, h);
     }
@@ -3015,6 +3195,8 @@ function setupInteractions(model, renderer, render, history) {
     if (under && under.closest && svg.contains(under) && (under.closest('[data-port]') || under.closest('[data-gport]'))) return;
     const cand = groupBorderPointAt(model, p.x, p.y, 24, drag.excludeGroup);
     if (!cand) return;
+    // the spot already holds a port — that port is the drop target, no ghost
+    if (groupPortNear(cand.group, cand.side, cand.t)) return;
     const g = cand.group;
     const ends =
       cand.side === 'top'
@@ -3094,8 +3276,10 @@ function setupInteractions(model, renderer, render, history) {
     } else if (drag.kind === 'node' || drag.kind === 'group' || drag.kind === 'resize') {
       // The drag rendered with the router skipped (cheap Z-routes); now that the
       // gesture is done, render once more so every auto-routed edge recomputes
-      // its obstacle-avoiding path against the final positions.
-      render();
+      // its obstacle-avoiding path against the final positions. A press that
+      // never moved changed nothing — skip the rebuild so the SVG (and its
+      // elements) survive intact for the dblclick that follows a plain click.
+      if (drag.moved) render();
     } else if (drag.kind === 'maybe-paramrow') {
       // never moved → it was a plain click on the row: select the node
       // (shift toggles it into the multi-selection, like clicking the header)
@@ -3150,28 +3334,21 @@ function setupInteractions(model, renderer, render, history) {
     if (e.button === 1) e.preventDefault();
   });
 
-  // right-click → context menu. Selects whatever is under the cursor first so
-  // node-scoped items (Node colour, Delete) apply to it; empty canvas clears.
+  // right-click → context menu for the CURRENT selection. It never selects or
+  // clears anything itself — left-click first, then right-click for actions.
   svg.addEventListener('contextmenu', (e) => {
     e.preventDefault();
-    const nodeG = closest(e, 'data-node');
-    const edgeEl = closest(e, 'data-edge');
     const gportEl = closest(e, 'data-gport');
-    const groupG = closest(e, 'data-group');
-    // a group's boundary port also carries data-group, so check it first
     const ctx = {};
     if (gportEl) {
+      // the port under the cursor is menu context (Delete port), not a selection
       const group = (model.groups || []).find((g) => g.id === gportEl.dataset.gport);
       const port = group && (group.ports || []).find((p) => p.id === gportEl.dataset.gportId);
       if (group && port) {
         ctx.group = group;
         ctx.gport = port;
-        select(null, null, group.id);
       }
-    } else if (nodeG) select(nodeG.dataset.node, null);
-    else if (edgeEl) select(null, edgeEl.dataset.edge);
-    else if (groupG) select(null, null, groupG.dataset.group);
-    else if (selNodes.size || selEdge || selGroups.size) select(null, null);
+    }
     openMenu(e.clientX, e.clientY, screenToGraph(e.clientX, e.clientY), ctx);
   });
 
@@ -3196,10 +3373,24 @@ function setupInteractions(model, renderer, render, history) {
 
   // --- double click: edit edge / node / param label, or open the context menu ---
   svg.addEventListener('dblclick', (e) => {
-    if (closest(e, 'data-role')) return; // buttons handled by click
+    // The first click's pointerup re-renders the SVG (a plain click on a
+    // node/group still runs a final render), which detaches the element that
+    // was under the cursor. The browser then computes the dblclick target as
+    // the nearest common ancestor of the two clicks — the SVG root — so
+    // e.target.closest('[data-node]') finds nothing and every rename gesture
+    // falls through to the empty-canvas menu. Resolve the element actually
+    // under the pointer now instead of trusting e.target.
+    const under = document.elementFromPoint ? document.elementFromPoint(e.clientX, e.clientY) : null;
+    const target = under && svg.contains(under) ? under : e.target;
+    const hit = (attr) => {
+      const t = target.closest ? target.closest(`[${attr}]`) : null;
+      return t && svg.contains(t) ? t : null;
+    };
+
+    if (hit('data-role')) return; // buttons handled by click
 
     // double-click a segment handle → collapse that straight run
-    const seg = closest(e, 'data-seg');
+    const seg = hit('data-seg');
     if (seg) {
       const edge = model.edges.find((ed) => ed.id === seg.dataset.edge);
       if (edge) {
@@ -3213,14 +3404,14 @@ function setupInteractions(model, renderer, render, history) {
     }
 
     // double-click an edge label / hint → edit the label
-    const lbl = closest(e, 'data-edgelabel');
+    const lbl = hit('data-edgelabel');
     if (lbl) {
       const edge = model.edges.find((ed) => ed.id === lbl.dataset.edgelabel);
       if (edge) editLabel(edge, lbl);
       return;
     }
 
-    const edgeEl = closest(e, 'data-edge');
+    const edgeEl = hit('data-edge');
     if (edgeEl) {
       const edge = model.edges.find((ed) => ed.id === edgeEl.dataset.edge);
       if (edge) {
@@ -3230,12 +3421,12 @@ function setupInteractions(model, renderer, render, history) {
       return;
     }
 
-    const nodeG = closest(e, 'data-node');
+    const nodeG = hit('data-node');
     if (nodeG) {
       const node = model.nodes.find((n) => n.id === nodeG.dataset.node);
       if (!node) return;
       select(node.id, null);
-      const paramG = e.target.closest('[data-param]');
+      const paramG = target.closest ? target.closest('[data-param]') : null;
       const param = paramG && node.params.find((p) => p.id === paramG.dataset.param);
       if (param) editParam(node, param);
       else editNode(node);
@@ -3243,7 +3434,7 @@ function setupInteractions(model, renderer, render, history) {
     }
 
     // double-click a group (its body or label) → rename it
-    const groupG = closest(e, 'data-group');
+    const groupG = hit('data-group');
     if (groupG) {
       const group = (model.groups || []).find((g) => g.id === groupG.dataset.group);
       if (group) {
@@ -3346,6 +3537,8 @@ function setupInteractions(model, renderer, render, history) {
   return {
     view,
     screenToGraph,
+    fitView,
+    resetView,
     getSelectedEdge: () => selEdge,
     getSelectedNodes: () => selNodes,
     getSelectedGroups: () => selGroups,
@@ -3779,6 +3972,13 @@ export function createGraph(container) {
       withHistory(() => setGroupColor(model, id, color));
       render();
     },
+    // Fill on/off. With fill off the group is an outline only: transparent
+    // interior, and clicks inside it pass through to the canvas (only the
+    // border selects/moves the group).
+    setGroupFill(id, on) {
+      withHistory(() => setGroupFill(model, id, on));
+      render();
+    },
     setGroupRect(id, rect) {
       withHistory(() => setGroupRect(model, id, rect));
       render();
@@ -3913,6 +4113,15 @@ export function createGraph(container) {
       interactions.view.y = py - ((py - interactions.view.y) / interactions.view.scale) * s;
       interactions.view.scale = s;
       renderer.setView(interactions.view);
+    },
+    // Zoom so all content (nodes, groups, routed edges) fits the canvas,
+    // centred with clear space around it.
+    fitView() {
+      interactions.fitView();
+    },
+    // Reset the viewport to the origin at 100%.
+    resetView() {
+      interactions.resetView();
     },
 
     getNodes: () => model.nodes,

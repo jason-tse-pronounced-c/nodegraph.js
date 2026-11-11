@@ -45,7 +45,7 @@ Plain JSON-serialisable objects, no class instances:
   nodes: [{ id, label, x, y, width?, color?, params: [{ id, name }] }],
   edges: [{ id, source, target,   // each: { node, param } or { group, port }
             label, labelT, points: [{ x, y }], color? }],
-  groups: [{ id, label, x, y, w, h, color?, ports: [{ id, side, t }] }],
+  groups: [{ id, label, x, y, w, h, color?, fill?, ports: [{ id, side, t }] }],
 }
 ```
 
@@ -62,6 +62,8 @@ Plain JSON-serialisable objects, no class instances:
   resizing reveals or hides nodes without deleting them. Groups nest: dragging
   a group also carries every group fully inside it (and their nodes), while
   clicking a group that sits inside another targets the innermost one.
+  `fill: false` makes a group outline-only — the interior stays transparent and
+  clicks pass through it (only the border and label are interactive).
 
 The MODEL section exports pure functions over this shape (`addNode(model, …)`
 etc.) — useful for manipulating a model without a UI. The `graph` object
@@ -94,10 +96,11 @@ re-renders.
 | `addGroup({ x, y, w, h, label, color })` | add a group box (defaults 320×220) |
 | `removeGroup(id)` | remove the box only — contained nodes stay |
 | `setGroupLabel(id, label)` / `setGroupColor(id, color)` | rename / tint (colour washes the fill and paints the double border) |
+| `setGroupFill(id, on)` | fill on/off; `false` = outline-only group (transparent interior, border-and-label hit area only). Menu: **Group → No fill** |
 | `setGroupRect(id, { x, y, w, h })` | reposition/resize (w, h floored at 1; interactive corner grips floor at `GROUP_MIN`) |
 | `moveGroup(id, x, y)` | move the box and translate every member node (and every nested group + its members) by the same delta |
 | `groupMembers(id)` | ids of the nodes currently inside (centre-based) |
-| `addGroupPort(groupId, { side, t })` | add a boundary port (`side`: `top`/`right`/`bottom`/`left`, `t`: 0..1 along it); returns it. Edges attach to a group through these anchors — one interface for the whole box (e.g. load balancing). A port is a drop target: edges from node output *or* input ports can wire to it; the port itself never starts an edge |
+| `addGroupPort(groupId, { side, t })` | add a boundary port (`side`: `top`/`right`/`bottom`/`left`, `t`: 0..1 along it); returns it. Edges attach to a group through these anchors — one interface for the whole box (e.g. load balancing). A port is a drop target: edges from node output *or* input ports can wire to it; the port itself never starts an edge. A port at a spot another port already occupies is reused, never stacked |
 | `removeGroupPort(groupId, portId)` | remove the port and every edge wired to it |
 | `getGroupPorts(groupId)` | the group's ports (live array) |
 
@@ -142,7 +145,7 @@ setting the same label, a `connect()` that throws — record nothing.
 
 | Call | Description |
 |---|---|
-| `exportPDF(nodeIds?)` | one-page vector PDF as a `Uint8Array`, ≥20 px clear space. Defaults to all nodes; pass an array/Set to export a subset (plus the groups containing them). Throws on an empty set |
+| `exportPDF(nodeIds?)` | one-page vector PDF as a `Uint8Array`, ≥20 px clear space. Defaults to all nodes; pass an array/Set to export a subset (plus the groups containing them). Throws on an empty set. The context-menu **Export … as PDF** action is selection-aware: it exports the current selection, or everything when nothing is selected |
 
 ### Theme & viewport
 
@@ -152,6 +155,8 @@ setting the same label, a `connect()` that throws — record nothing.
 | `view` | live `{ x, y, scale }` of the pan/zoom transform |
 | `panBy(dx, dy)` | pan by screen pixels |
 | `zoomTo(scale)` | zoom centred on the canvas (clamped 0.2–4) |
+| `fitView()` | zoom and pan so everything fits on screen with a margin, centred — nodes, groups, and the routed paths of every edge (clamped 0.2–4) |
+| `resetView()` | reset the viewport to the origin at 100% (`{ x: 0, y: 0, scale: 1 }`) |
 
 ### Misc
 
@@ -166,7 +171,7 @@ setting the same label, a `connect()` that throws — record nothing.
 | Gesture / Call | Description |
 |---|---|
 | `Ctrl`/`Cmd` + `C` | copy the selected nodes + groups to the internal clipboard (a copied group auto-includes its member nodes; edges between copied nodes come along) |
-| `Ctrl`/`Cmd` + `V` | paste with fresh ids, offset by one grid step — repeat pastes cascade |
+| `Ctrl`/`Cmd` + `V` | paste with fresh ids, centred in the viewport (the whole copied bounds land mid-screen, so you always have room to drag it where you want) |
 | menu **Copy** / **Paste** | same, from the context menu (Paste appears once something is copied) |
 
 ---
@@ -181,7 +186,7 @@ setting the same label, a `connect()` that throws — record nothing.
 | drag node | move, snapping to the grid; connected waypoints follow (auto edges re-route on drop) |
 | drag group body | move the group, every group nested in it, and their nodes; membership is frozen at drag start. Clicking a group inside another targets the innermost one |
 | drag a selected group's corner grip | resize from any of the four corners (opposite corner fixed, snaps to grid, floors at `GROUP_MIN`) |
-| drag empty canvas | marquee-select nodes |
+| drag empty canvas | marquee-select nodes and groups (a group is selected only when the rectangle fully contains it) |
 | drag middle button | pan (wheel zooms, anchored at the cursor) |
 | drag port → port | connect (either direction: out→in or in→out) |
 | drag port → group border | connect to the group: a ghost dot + border highlight preview the spot, dropping there creates a boundary port and wires it (works from an output *or* input port — the edge is oriented automatically) |
@@ -194,7 +199,7 @@ setting the same label, a `connect()` that throws — record nothing.
 | drag an edge label | slide it along the edge |
 | double-click node / param / edge label / group label | inline text editor (Enter commits, Escape cancels, clicking away commits) |
 | `+` / `−` / `×` buttons | add param / remove param / delete node |
-| right-click, or double-click empty canvas | context menu: undo/redo, add node/group, delete selection, copy/paste, rename/tint group, tint node/edge, Export PDF / JSON, Import JSON, Fit view, theme toggle |
+| right-click, or double-click empty canvas | context menu: undo/redo, add node/group, delete selection, copy/paste, rename node/group, tint node/group/edge, group **No fill**, Export selection/all as PDF, Export / Import JSON, Fit view, Reset view, theme toggle. Right-clicking never changes the selection — the menu acts on what is already selected (left-click first to target a node/edge/group) |
 | `Ctrl`/`Cmd` + `C` / `V` | copy / paste the selection (see Copy & paste) |
 | `Ctrl`/`Cmd` + `Z` / `Shift`+`Z` / `Y` | undo / redo (see Undo / redo) |
 | Delete / Backspace | remove the selection |

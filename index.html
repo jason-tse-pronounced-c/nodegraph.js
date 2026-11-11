@@ -26,8 +26,8 @@
     graph.setEdgeLabel(e1.id, 'data');
 
     // A group is a labelled rectangle drawn underneath the nodes, with a solid
-    // double border and a light tinted fill (right-click → Group colour to
-    // tint it). Membership is geometric (a node belongs while its centre is
+    // double border and a light tinted fill (click it, then right-click → Group
+    // colour to tint it). Membership is geometric (a node belongs while its centre is
     // inside the box), so dragging the group carries Source + Process along
     // together — and any group nested inside it too. Right-click the canvas for
     // "Add group here"; drag a group's body to move it, any of its four corner
@@ -39,9 +39,9 @@
     // More things to try:
     //  • drag a param row up/down to reorder it (edges follow the row)
     //  • select nodes/groups and Ctrl/Cmd+C, then Ctrl/Cmd+V to paste a copy
-    //    (a copied group brings its nodes along; repeat pastes cascade)
+    //    (a copied group brings its nodes along; pastes land centred in the view)
     //  • where two edges overlap, click the same spot repeatedly to cycle
-    //    between them; right-click an edge for "Edge colour"
+    //    between them; select an edge, then right-click it for "Edge colour"
     //  • auto-routed edges recompute their obstacle-avoiding path when you
     //    drop a node, not while you drag it
   </script>
