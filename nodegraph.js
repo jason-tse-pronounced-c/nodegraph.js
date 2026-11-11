@@ -2674,20 +2674,42 @@ function setupInteractions(model, renderer, render, history) {
           const sub = document.createElement('div');
           sub.className = 'ng-menu ng-menu-submenu';
           renderItems(item.submenu, sub);
-          btn.addEventListener('mouseenter', () => {
+          let hideTimer = null;
+          const showSub = () => {
+            if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+            // collapse any sibling submenu so only one branch is open at a time
+            // (leaving a click-locked one alone)
+            for (const other of el.querySelectorAll('.ng-menu-submenu')) {
+              if (other !== sub && !other.parentElement.classList.contains('ng-open')) other.style.display = '';
+            }
             // flip to the left when the submenu would spill outside the canvas
             sub.classList.remove('ng-menu-submenu-left');
             sub.style.display = 'flex';
             const sr = sub.getBoundingClientRect();
             if (sr.right > cr.right - 4) sub.classList.add('ng-menu-submenu-left');
-          });
-          wrap.addEventListener('mouseleave', () => {
-            if (!wrap.classList.contains('ng-open')) sub.style.display = '';
-          });
+          };
+          // Hover-intent: wait a beat before collapsing, so the pointer can
+          // cross the 2px gap between a row and its submenu without the menu
+          // vanishing out from under it. Re-entering the row — or its submenu,
+          // which is a child of the row — cancels the pending hide.
+          const scheduleHide = () => {
+            if (wrap.classList.contains('ng-open')) return;
+            if (hideTimer) clearTimeout(hideTimer);
+            hideTimer = setTimeout(() => {
+              hideTimer = null;
+              if (!wrap.classList.contains('ng-open')) sub.style.display = '';
+            }, 250);
+          };
+          wrap.addEventListener('mouseenter', showSub);
+          wrap.addEventListener('mouseleave', scheduleHide);
           btn.addEventListener('click', (ev) => {
             ev.stopPropagation();
             wrap.classList.toggle('ng-open');
-            sub.style.display = wrap.classList.contains('ng-open') ? 'flex' : '';
+            if (wrap.classList.contains('ng-open')) showSub();
+            else {
+              if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+              sub.style.display = '';
+            }
           });
           wrap.appendChild(btn);
           wrap.appendChild(sub);
@@ -2860,8 +2882,9 @@ function setupInteractions(model, renderer, render, history) {
       }
       if (!selNodes.has(node.id)) select(node.id, null);
       else closeEditor();
-      // dragging one node of a multi-selection moves the whole selection
-      nodeDrag([...selNodes], p);
+      // dragging one item of a multi-selection moves the whole selection —
+      // groups included, so a mixed group + node selection travels together
+      selectionDrag(p);
       return;
     }
 
@@ -2895,7 +2918,8 @@ function setupInteractions(model, renderer, render, history) {
     // it would have matched first. When groups overlap, the INNERMOST one under
     // the cursor wins — dragging a group fully embedded in another moves the
     // child, never the parent. Dragging moves the group, every group nested in
-    // it, and every node inside any of them.
+    // it, every node inside any of them, and every individually selected node
+    // outside them (a mixed selection moves as one block).
     const groupG = closest(e, 'data-group');
     if (groupG) {
       const p = screenToGraph(e.clientX, e.clientY);
@@ -2923,10 +2947,17 @@ function setupInteractions(model, renderer, render, history) {
     drag = { kind: 'marquee', ox: p.x, oy: p.y, shift: e.shiftKey, base, baseGroups };
   });
 
-  // The drag scope for the current group selection: every selected group, every
-  // group nested inside them, and every node inside any of them. Snapshotted
-  // once at drag start so membership stays frozen for the whole drag.
-  const groupScope = () => groupClosure(model, selGroups.size ? selGroups : new Set());
+  // The drag scope for the current selection: every selected group, every group
+  // nested inside them, every node inside any of them — PLUS every individually
+  // selected node (inside a group or not). Snapshotted once at drag start so
+  // membership stays frozen for the whole drag. This is what makes a mixed
+  // group + node selection move as one block: grabbing the group carries the
+  // loose selected nodes too, and grabbing a loose node carries the group.
+  const groupScope = () => {
+    const scope = groupClosure(model, selGroups.size ? selGroups : new Set());
+    for (const id of selNodes) scope.nodeIds.add(id);
+    return scope;
+  };
 
   // The innermost group containing the point (smallest area wins), or null.
   // Used so clicking a group fully embedded in another targets the child.
@@ -2995,10 +3026,11 @@ function setupInteractions(model, renderer, render, history) {
       updateParamIndicator();
     } else if (drag.kind === 'group') {
       const p = screenToGraph(e.clientX, e.clientY);
-      // move the whole scope (selected groups + nested groups + their members)
-      // by the snapped delta so everything lands on grid lines (recomputed from
-      // the current, already-snapped origins). The scope was snapshotted at
-      // drag start, so nodes entering a group mid-drag are not carried.
+      // move the whole scope (selected groups + nested groups + their members +
+      // loose selected nodes) by the snapped delta so everything lands on grid
+      // lines (recomputed from the current, already-snapped origins). The scope
+      // was snapshotted at drag start, so nodes entering a group mid-drag are
+      // not carried.
       const dx = snapToGrid(p.x - drag.ox);
       const dy = snapToGrid(p.y - drag.oy);
       if (dx || dy) {
@@ -3155,7 +3187,19 @@ function setupInteractions(model, renderer, render, history) {
     }
   };
 
-  const startNodeDrag = (p) => nodeDrag([...selNodes], p);
+  // Begin a drag from a node press. With groups also selected, the gesture
+  // becomes a group drag over the full selection scope (selected groups +
+  // nested groups + their members + every loose selected node), so a mixed
+  // group + node selection moves as one block whichever item you grab.
+  const selectionDrag = (p) => {
+    if (selGroups.size) {
+      drag = { kind: 'group', id: null, ox: p.x, oy: p.y, scope: groupScope(), pre: history.begin() };
+    } else {
+      nodeDrag([...selNodes], p);
+    }
+  };
+
+  const startNodeDrag = (p) => selectionDrag(p);
 
   // --- connect-drag cue: where would a group boundary port land? ---
   // While dragging an edge, hovering a group's border previews the drop: the
@@ -3456,8 +3500,20 @@ function setupInteractions(model, renderer, render, history) {
     }
     // Ctrl/Cmd+C and Ctrl/Cmd+V operate on the internal buffer (the INPUT
     // guard above means they never fight with the inline text editor).
+    // Ctrl/Cmd+A toggles between selecting everything (all nodes and groups)
+    // and deselecting all — pressing it again on a full selection clears it.
     if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
       const k = e.key.toLowerCase();
+      if (k === 'a') {
+        e.preventDefault();
+        const everything = new Set(model.nodes.map((n) => n.id));
+        const allGroups = new Set((model.groups || []).map((g) => g.id));
+        const allSelected =
+          selNodes.size === everything.size && [...everything].every((id) => selNodes.has(id)) &&
+          selGroups.size === allGroups.size && [...allGroups].every((id) => selGroups.has(id));
+        select(allSelected ? null : everything, null, allSelected ? null : allGroups);
+        return;
+      }
       if (k === 'c') {
         if (selNodes.size || selGroups.size) {
           e.preventDefault();

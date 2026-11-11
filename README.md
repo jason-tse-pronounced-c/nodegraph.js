@@ -77,6 +77,7 @@ with colored nodes, labeled/colored edges, nested groups, and boundary ports.
 | double-click a segment grip | collapse the run |
 | double-click node / param / edge / group label | inline text editor (Enter commits, Esc cancels) |
 | right-click, or double-click empty canvas | context menu (never changes the selection — left-click to target first) |
+| `Ctrl/Cmd + A` | select all / deselect all (toggle) |
 | `Ctrl/Cmd + C` / `V` | copy / paste |
 | `Ctrl/Cmd + Z` / `Shift+Z` / `Y` | undo / redo |
 | Delete / Backspace | remove the selection |
